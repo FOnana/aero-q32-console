@@ -1,7 +1,7 @@
 # AERO Q32 Console
 
-> Windows 上的 Jieli 方案真无线耳机控制台 —— 不用手机，也能看电量、切降噪、调音效。
-> 在 **1MORE AERO Q32** 上开发并验证。
+> 把 **1MORE AERO Q32** 的官方安卓伴侣应用，在 Windows 上原生重写了一遍。
+> 不用掏手机，就能看电量、切降噪、调音效。
 
 ![界面截图](docs/screenshot.png)
 
@@ -10,6 +10,15 @@
 `Python 3.9+` · `Windows 10/11` · `MIT` · 非官方项目
 
 </div>
+
+> ### ⚠️ 先读这个，再动手
+>
+> **目前只验证过 1MORE AERO Q32 一款设备。这不是通用蓝牙耳机工具。**
+>
+> 能否使用取决于两个**硬性条件**（标准 SPP 串口 + 同一套命令协议），缺一不可 ——
+> 详见 [兼容性](#兼容性)。同品牌的其他型号也按型号分叉，其他品牌基本不可用。
+>
+> 换设备前请先跑一分钟自检，别浪费时间去调。
 
 ---
 
@@ -55,6 +64,11 @@
 
 > Windows 会在配对后为该耳机的 SPP 服务创建一个虚拟串口。本项目通过**设备硬件 ID**
 > 自动识别这个端口，从不猜 COM 号，所以换电脑、重新配对都不会连错。
+>
+> **⏳ 首次连接可能要等十几秒。** Windows 打开蓝牙串口是**瞬间返回**的，但底层 RFCOMM
+> 链路此时还没建立 —— 实测某设备要 **6 秒以上**才通，这期间发出去的数据全部丢失。
+> 程序会在 10 秒窗口内反复重试握手，所以看到「正在建立蓝牙链路」时请耐心等，
+> 不要以为卡死了。
 
 ---
 
@@ -136,17 +150,44 @@ python app.py
 
 ## 兼容性
 
-- ✅ **已验证**：1MORE AERO Q32（杰理方案）——电量、8 种降噪、连接模式、风格音效全部可用
-- 🤔 **可能可用**：其他杰理方案的耳机（帧格式和命令码是芯片级而非型号级）
-- ❌ **不可用**：恒玄(BES) / 络达(Airoha) / 蓝讯(Bluetrum) / 高通 GAIA 等其他方案
+### 两个硬性条件，缺一不可
 
-**不同型号支持的命令并不相同**，用这个命令看你的设备实际支持什么：
+| | 条件 | 不满足会怎样 |
+|---|---|---|
+| **① 传输层** | 控制通道必须挂在**标准 SPP UUID** `00001101-...` 上，Windows 才会为它创建虚拟串口 | 厂商私有 UUID（例如 `JL_SPP` 的 `EDF00000-EDFE-DFED-FEDF-EDFEDFEDFEDF`）**根本没有串口**，本工具碰不到 |
+| **② 协议层** | 设备必须说**这套 `11 01 00 ...` 帧协议** | 有串口也白搭 —— 设备在上面不应答 |
+
+### 实测结果
+
+| 设备 | 结果 |
+|---|---|
+| **1MORE AERO Q32** | ✅ 电量 / 8 种降噪 / 连接模式 / 风格音效 全部可用 |
+| **漫步者花再 Zero Buds** | ❌ 虽然是杰理芯片，但控制通道在私有 UUID（`JL_SPP`）上，且使用另一套协议 |
+
+### 为什么"同样是杰理芯片"也不能保证可用
+
+本项目的命令表（`CMD_GET_LISTEN_MODE`、`CMD_SET_EARPHONE_EQ`…）是 **1MORE 自己的应用层协议**，
+不是芯片级的。杰理 SDK 只提供底层串口通道和固件升级能力。
+
+打个比方：**杰理提供电话线，1MORE 在上面说了自己的暗语。** 别的品牌用同一家电话公司，
+说的是另一套暗语。
+
+### 一分钟判断你的设备行不行
 
 ```bash
-python aero_cli.py probe
+python aero_cli.py doctor    # ① 有没有"远端设备口"
+python aero_cli.py probe     # ② 设备应不应答（只发只读命令，安全）
 ```
 
-详细说明见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+| `doctor` 显示 | `probe` 结果 | 结论 |
+|---|---|---|
+| 有远端设备口 | **有应答** | ✅ 能用 |
+| 有远端设备口 | 全无应答 | ❌ 传输或协议不匹配 |
+| 只有本机传入口 | — | ❌ 未配对，或该型号不开放 SPP |
+
+> **口诀：`doctor` 看到端口不算数，`probe` 有应答才算数。**
+
+详细说明与已知边界见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 
 ---
 
@@ -175,12 +216,36 @@ python aero_cli.py probe
 ## 常见问题
 
 <details>
+<summary><b>一直显示"正在建立蓝牙链路"，或者反复搜索找不到耳机</b></summary>
+
+**最常见的原因：链路需要的时间比你预期长。** Windows 打开蓝牙串口是瞬间返回的，
+但底层 RFCOMM 连接要几秒才通（实测 **6.2 秒**），这期间写出的数据会静默丢失。
+
+当前版本已经会在 10 秒内反复重试握手，**请先等满十几秒再下结论**。
+
+如果始终连不上，检查你的型号是不是用的**厂商私有 SPP 服务**：
+
+```bash
+python aero_cli.py ports
+```
+
+再去设备管理器（或 `Get-PnpDevice`）看该设备的服务列表，找有没有非标准的服务名 ——
+例如 `JL_SPP` 绑定到 `EDF00000-EDFE-DFED-FEDF-EDFEDFEDFEDF` 这样的 UUID。
+
+**Windows 只为标准 SPP（`00001101-...`）创建 COM 口**，私有 UUID 没有串口可达，
+本工具碰不到。这属于传输层不匹配，不是 bug。
+详见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+</details>
+
+<details>
 <summary><b>提示找不到耳机 / 未找到可应答的串口</b></summary>
 
 先跑 `python aero_cli.py doctor`，它会告诉你具体是哪种情况。
 
 - 只有本机传入口（硬件 ID 含 `LOCALMFG`）→ 耳机没配对，或该型号不提供 SPP
 - 完全没有任何蓝牙串口 → 蓝牙没开 / 没配对 / 适配器用的是第三方驱动栈
+- **有远端设备口但设备不应答** → 要么是私有 UUID 的传输，要么协议不同
+  （跑 `python aero_cli.py probe` 确认）
 
 第三方驱动栈是常见原因，在设备管理器里把蓝牙适配器换成微软自带驱动即可。
 </details>
@@ -276,12 +341,19 @@ python aero_cli.py probe     # 设备支持哪些命令（只读，安全）
 
 ## English
 
-**A community Windows controller for Jieli-based true-wireless earbuds**, developed and
-verified against the 1MORE AERO Q32.
+**A Windows rewrite of the 1MORE AERO Q32 companion app.** Read battery levels, switch ANC
+modes and change sound presets without reaching for your phone.
+
+> ### Scope — read this first
+>
+> **Only the 1MORE AERO Q32 has been verified. This is not a universal earbud tool.**
+>
+> Two hard requirements must both hold: the control channel must sit on the **standard SPP
+> UUID** (`00001101-...`, so Windows creates a COM port), and the device must speak **this
+> frame protocol**. Same-brand models differ; other brands generally will not work.
 
 The vendor companion app is Android-only. This project reimplements the same device control
-natively on Windows - battery levels, 8 ANC modes, sound presets and link modes - over the
-Bluetooth SPP link, with a documented protocol.
+natively on Windows over the Bluetooth SPP link, with a documented protocol.
 
 ```bash
 pip install -r requirements.txt
@@ -291,10 +363,26 @@ python aero_cli.py battery     # battery levels
 python aero_cli.py probe       # which commands your device answers (read-only)
 ```
 
+### Quick compatibility check
+
+| `doctor` shows | `probe` returns | Verdict |
+|---|---|---|
+| a remote device port | any replies | works |
+| a remote device port | no replies at all | transport or protocol mismatch |
+| only a local incoming port | - | not paired, or the model does not expose SPP |
+
+> Seeing a COM port is not enough — the device must actually answer. Some models use a
+> **vendor-specific SPP UUID** instead of the standard one; Windows creates no COM port for
+> those, so this tool cannot reach them.
+
+### Notes
+
 * Windows 10/11, Python 3.9+. Earbuds must already be **paired** in Windows.
+* **The first connection can take over ten seconds.** Opening a Bluetooth serial port returns
+  instantly, but the RFCOMM link behind it may take 6+ seconds to come up; data written during
+  that window is dropped. Discovery retries the handshake for up to 10 seconds.
 * The serial port is discovered from the device hardware ID - never a hard-coded COM number.
-* Works with Jieli-based earbuds. Other chipsets (BES, Airoha, Bluetrum, Qualcomm GAIA) use
-  different protocols and will not work.
+* Verified: 1MORE AERO Q32. Not verified: anything else.
 * Firmware-flashing and irreversible-delete commands are **hard-blocked in code**, even when
   the raw console is unlocked.
 
