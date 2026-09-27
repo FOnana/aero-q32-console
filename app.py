@@ -34,6 +34,16 @@ ACCENT, OK, WARN = "#FB3A1F", "#4CC38A", "#E5A00D"
 APP_TITLE = "Earbuds Console"   # 应用名; 连接后会自动加上识别到的设备名
 APP_TITLE_ZH = "蓝牙耳机控制台"
 
+# ── 轮询频率 ──────────────────────────────────────────────────────────
+# 各查询按各自节奏进行, 而不是每轮全问一遍。
+# 耳机 MCU 要同时处理音频链路和这些查询, 问得太勤会挤占它,
+# 实测表现为"命令发出去了, 设备却不采纳"。官方 App 不做持续轮询。
+POLL_BATTERY = 10.0       # 电量变化很慢, 不用频繁问
+POLL_MODE = 4.0           # 降噪模式可能被耳机自己改(如子模式回落), 稍勤一点
+POLL_CONN = 15.0
+POLL_SOUND = 30.0
+QUIET_AFTER_CMD = 3.0     # 用户发命令后的静默窗口: 这段时间不打扰设备
+
 MAX_LOG_LINES = 400
 LOW_BATTERY = 20          # 低电量阈值 % (可被配置覆盖)
 HEARTBEAT_SEC = 60        # 无变化时的心跳日志间隔 (可被配置覆盖)
@@ -75,11 +85,18 @@ def acquire_single_instance(name="AeroQ32_Control_Console_SingleInstance"):
     """返回 True 表示本进程是唯一实例; False 表示已有实例在运行。"""
     global _SINGLE_MUTEX
     try:
-        k = ctypes.windll.kernel32
+        # use_last_error=True 让 ctypes 在调用返回的瞬间就保存错误码,
+        # 否则之后任何 Win32 调用都可能把它冲掉, 导致误判 "已在运行"。
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
         k.CreateMutexW.restype = ctypes.c_void_p
-        k.SetLastError(0)
+        k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        ctypes.set_last_error(0)
         h = k.CreateMutexW(None, False, name)
-        already = (k.GetLastError() == 183)     # ERROR_ALREADY_EXISTS
+        err = ctypes.get_last_error()
+        if not h:
+            A.log().warning("CreateMutexW 失败 err=%s, 按唯一实例继续", err)
+            return True
+        already = (err == 183)                  # ERROR_ALREADY_EXISTS
         _SINGLE_MUTEX = h                       # 持有到进程结束, 勿释放
         A.log().info("单实例检查: already_running=%s", already)
         return not already
@@ -293,6 +310,11 @@ class Worker(QObject):
         self._last_sound = None
         self._last_hb = 0.0
         self.hb_sec = HEARTBEAT_SEC
+        self._next_batt = 0.0
+        self._next_mode = 0.0
+        self._next_conn = 0.0
+        self._next_sound = 0.0
+        self._quiet_until = 0.0
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -337,46 +359,62 @@ class Worker(QObject):
                     self._last_batt = self._last_mode = self._last_conn = None
                     self._last_sound = None
                     self._last_hb = 0.0
+                    # 刚连上先全量取一次, 之后按各自节奏轮询
+                    self._next_batt = self._next_mode = 0.0
+                    self._next_conn = self._next_sound = 0.0
+                    self._quiet_until = time.time() + 0.5
                     backoff = 2.0
 
                 if not self.dev.healthy(6.0):
                     raise IOError("链路假死 (6 秒无有效帧)")
 
-                if not self.busy_probe:
-                    b = self.dev.battery()
-                    if b:
-                        self.battery.emit(b)
-                        if b != self._last_batt:
-                            self.log.emit("RX 电量   左%d%%   右%d%%   盒%s" %
-                                          (b["left"], b["right"],
-                                           "%d%%" % b["case"] if b.get("case") is not None else "--"))
-                            # 原始报文只进文件日志, 用于排查数值异常跳动
-                            A.log().info("电量变化 -> 左%s 右%s 盒%s | payload=[%s] len=%s",
-                                         b.get("left"), b.get("right"), b.get("case"),
-                                         b.get("raw"), b.get("len"))
-                            self._last_batt = b
-                    m = self.dev.get_listen_mode()
-                    if m is not None:
-                        self.mode.emit(m)
-                        if m != self._last_mode:
-                            self.log.emit("RX 降噪模式   %s (%d)" % (A.LISTEN_MODES.get(m, "?"), m))
-                            self._last_mode = m
-                    c = self.dev.get_connect_option()
-                    if c is not None:
-                        self.connect.emit(c)
-                        if c != self._last_conn:
-                            self.log.emit("RX 连接模式   %s (%d)" % (A.CONNECT_TYPES.get(c, "?"), c))
-                            self._last_conn = c
-                    snd = self.dev.get_preset_sound()
-                    if snd is not None:
-                        self.sound.emit(snd)
-                        if snd != self._last_sound:
-                            self.log.emit("RX 风格音效   %s (%d)"
-                                          % (A.PRESET_SOUND_NAMES.get(snd, "预设"), snd))
-                            self._last_sound = snd
-
-                    # 心跳: 数值没变化时也定期报一次, 证明链路是活的
+                # ── 分频轮询 ──────────────────────────────────────────────
+                # 每个查询按自己的节奏走, 而不是每轮全问一遍。
+                # 耳机 MCU 要同时处理音频链路和这些查询, 问得太勤会挤占它,
+                # 实测表现为"命令发出去了, 设备却不采纳"。
+                # 用户发命令后还有一段静默窗口, 期间完全不打扰设备。
+                if not self.busy_probe and time.time() >= self._quiet_until:
                     now = time.time()
+                    if now >= self._next_batt:
+                        self._next_batt = now + POLL_BATTERY
+                        b = self.dev.battery()
+                        if b:
+                            self.battery.emit(b)
+                            if b != self._last_batt:
+                                self.log.emit("RX 电量   左%d%%   右%d%%   盒%s" %
+                                              (b["left"], b["right"],
+                                               "%d%%" % b["case"] if b.get("case") is not None else "--"))
+                                # 原始报文只进文件日志, 用于排查数值异常跳动
+                                A.log().info("电量变化 -> 左%s 右%s 盒%s | payload=[%s] len=%s",
+                                             b.get("left"), b.get("right"), b.get("case"),
+                                             b.get("raw"), b.get("len"))
+                                self._last_batt = b
+                    if now >= self._next_mode:
+                        self._next_mode = now + POLL_MODE
+                        m = self.dev.get_listen_mode()
+                        if m is not None:
+                            self.mode.emit(m)
+                            if m != self._last_mode:
+                                self.log.emit("RX 降噪模式   %s (%d)" % (A.LISTEN_MODES.get(m, "?"), m))
+                                self._last_mode = m
+                    if now >= self._next_conn:
+                        self._next_conn = now + POLL_CONN
+                        c = self.dev.get_connect_option()
+                        if c is not None:
+                            self.connect.emit(c)
+                            if c != self._last_conn:
+                                self.log.emit("RX 连接模式   %s (%d)" % (A.CONNECT_TYPES.get(c, "?"), c))
+                                self._last_conn = c
+                    if now >= self._next_sound:
+                        self._next_sound = now + POLL_SOUND
+                        snd = self.dev.get_preset_sound()
+                        if snd is not None:
+                            self.sound.emit(snd)
+                            if snd != self._last_sound:
+                                self.log.emit("RX 风格音效   %s (%d)"
+                                              % (A.PRESET_SOUND_NAMES.get(snd, "预设"), snd))
+                                self._last_sound = snd
+                    # 心跳: 数值没变化时也定期报一次, 证明链路是活的
                     if now - self._last_hb >= self.hb_sec:
                         self._last_hb = now
                         st2 = self.dev.stats
@@ -387,7 +425,7 @@ class Worker(QObject):
                                          self._last_sound if self._last_sound is not None else "--",
                                          st2.get("frames", 0), st2.get("dropped", 0), st2.get("timeouts", 0)))
                     self.stats.emit(dict(self.dev.stats))
-                self.wake.wait(2.0); self.wake.clear()
+                self.wake.wait(1.0); self.wake.clear()
                 continue
 
             except A.PortBusy as ex:
@@ -422,13 +460,21 @@ class Worker(QObject):
         try:
             if not self.dev:
                 self.log.emit("尚未连接，无法切换"); return
+            # 发命令前先安静下来: 期间不再轮询, 把链路让给这条命令
+            self._quiet_until = time.time() + QUIET_AFTER_CMD
             self.log.emit("TX 降噪模式 -> %s  (%s)" % (A.LISTEN_MODES.get(v, v), tag))
             got = self.dev.set_listen_mode(v)
             if got is None:
                 self.log.emit("⚠ 设备未确认，稍后自动校正")
             else:
                 if got != v:
-                    self.log.emit("  设备未采纳，当前为 %s (%d)" % (A.LISTEN_MODES.get(got, "?"), got))
+                    # 设备未采纳。如实告知, 不假装成功; 并给出最可能的原因,
+                    # 否则用户只会看到"没反应", 无从判断是软件问题还是耳机状态问题。
+                    self.log.emit("  设备未采纳，当前为 %s (%d)"
+                                  % (A.LISTEN_MODES.get(got, "?"), got))
+                    self.log.emit("  常见原因: 耳机未佩戴或在充电盒中 / 电量偏低 / "
+                                  "与手机同时连接时手机端优先 / "
+                                  "「风噪降低」这类子模式需要降噪已开启。")
                 self.mode.emit(got)
         except Exception as ex:
             self.log.emit("⚠ 写入失败: %s" % ex); A.log().exception("设置降噪失败")
@@ -438,6 +484,7 @@ class Worker(QObject):
         try:
             if not self.dev:
                 self.log.emit("尚未连接，无法切换"); return
+            self._quiet_until = time.time() + QUIET_AFTER_CMD
             self.log.emit("TX 风格音效 -> %s (%d)" % (A.PRESET_SOUND_NAMES.get(v, "预设"), v))
             got = self.dev.set_preset_sound(v)
             if got is None:
@@ -453,6 +500,7 @@ class Worker(QObject):
         try:
             if not self.dev:
                 self.log.emit("尚未连接，无法切换"); return
+            self._quiet_until = time.time() + QUIET_AFTER_CMD
             self.log.emit("TX 连接模式 -> %s" % A.CONNECT_TYPES.get(v, v))
             self.log.emit("   (切换会重建蓝牙链路，控制通道将中断约 10 秒)")
             self.dev.set_connect_option(v)

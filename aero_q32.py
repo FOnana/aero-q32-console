@@ -456,25 +456,33 @@ class AeroQ32:
                 pass                       # 链路被打断, 预期内
             time.sleep(settle)
 
-    def set_listen_mode(self, mode, verify_timeout=2.5):
+    def set_listen_mode(self, mode, verify_timeout=3.0):
         """写后回读确认。
 
-        耳机切换降噪模式是**异步**的：自适应(7)这类模式切得慢，
-        过早回读会读到过渡中的旧值(实测约 4% 概率)。因此这里轮询重试，
-        直到读回目标值或超时；超时则返回最后一次观察到的值，由上层判断。
+        耳机切换降噪模式是**异步**的: 自适应(7)这类模式切得慢, 过早回读会读到
+        过渡中的旧值。所以这里要回读确认, 但**读得不能太密** ——
+        耳机 MCU 同时还要跑音频链路, 密集查询会挤占它, 反而让切换更容易失败。
+
+        因此: 先给 0.45s 静默应用时间, 之后每 0.65s 读一次, 最多约 4 次。
+        未生效时返回最后一次观察到的值, 并把原始报文写进日志以便排查。
         """
         with self._lock:
             self.send(0x5E, bytes([mode]))
-            time.sleep(0.30)
+            time.sleep(0.45)
             end = time.time() + verify_timeout
             got = None
+            tries = 0
             while True:
-                got = self.get_listen_mode()
+                p = self.request(0x5F, wait=2.0)
+                got = p[0] if p else None
+                tries += 1
                 if got == mode:
                     return got
                 if time.time() >= end:
+                    log().warning("设置降噪 %d 未被采纳: 回读=%s raw=%s 探测 %d 次",
+                                  mode, got, p.hex(" ") if p else "(无应答)", tries)
                     return got
-                time.sleep(0.20)
+                time.sleep(0.65)
 
 
 # ============================ 安全闸 ============================
