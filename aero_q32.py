@@ -188,27 +188,41 @@ def find_port(prefer_mac=None, prefer_port=None):
     return None
 
 
-def probe_port(port, timeout=2.0):
-    """开这个口试一次握手。
-    返回 'ok'(是本耳机) / 'busy'(口被别的进程占用) / 'no'(能开但无应答)"""
+def probe_port(port, timeout=1.0, settle=10.0):
+    """开这个口试握手, 判断是不是我们的设备。
+
+    返回 'ok'(是本设备) / 'busy'(口被别的进程占用) / 'no'(能开但无应答)
+
+    ⚠ 关键(实测踩过的坑): Windows 蓝牙串口在 serial.Serial() 返回时
+      **链路可能还没建立**。实测某耳机要 6 秒以上才通, 这段时间发出去的数据
+      全部丢失。如果只发一次握手、等两秒就判定"无应答", 会把本来兼容的设备
+      误判成"找不到", 并且每次重试都重复这个错误 —— 表现就是**无限搜索失败循环**。
+
+      所以这里在 settle 秒内**反复重试**握手, 收到合法应答立刻返回。
+    """
     try:
         s = serial.Serial(port, 9600, timeout=0.3, write_timeout=2)
     except Exception as e:
         return "busy" if _is_busy(e) else "no"   # 关键: 与"没这个设备"区分开
     try:
         s.reset_input_buffer()
-        s.write(build(0x4D, "01"))
-        s.flush()
-        end = time.time() + timeout
+        end = time.time() + max(settle, timeout)
         buf = bytearray()
         while time.time() < end:
-            n = s.in_waiting
-            if n:
-                buf += s.read(n)
-                for sof, cmd, _pl in extract(buf):
-                    if sof == SOF_RSP and cmd == 0x4D:
-                        return "ok"
-            time.sleep(0.05)
+            try:
+                s.write(build(0x4D, "01"))
+                s.flush()
+            except Exception:
+                return "no"          # 写失败: 链路断了, 不值得继续
+            step = time.time() + timeout
+            while time.time() < step:
+                n = s.in_waiting
+                if n:
+                    buf += s.read(n)
+                    for sof, cmd, _pl in extract(buf):
+                        if sof == SOF_RSP and cmd == 0x4D:
+                            return "ok"
+                time.sleep(0.05)
         return "no"
     finally:
         try:
@@ -217,7 +231,7 @@ def probe_port(port, timeout=2.0):
             pass
 
 
-def discover(timeout=2.0, prefer_port=None, prefer_mac=None):
+def discover(timeout=2.0, prefer_port=None, prefer_mac=None, settle=10.0):
     """逐个探测远端 SPP 口, 找出真正会应答握手的那一个。
 
     返回 (port, mac); 找不到返回 (None, None);
@@ -232,7 +246,7 @@ def discover(timeout=2.0, prefer_port=None, prefer_mac=None):
         cands.sort(key=lambda c: 0 if c["mac"] == want else 1)
     busy = []
     for c in cands:
-        r = probe_port(c["device"], timeout)
+        r = probe_port(c["device"], timeout=1.0, settle=settle)
         if r == "ok":
             return c["device"], c["mac"]
         if r == "busy":
@@ -379,8 +393,15 @@ class AeroQ32:
             return None
 
     # ---- 业务 ----
-    def handshake(self):
-        return self.request(0x4D, "01", wait=2.0)
+    def handshake(self, wait=2.0, retries=4):
+        """握手。链路刚建立时前几次可能丢, 因此重试若干次。"""
+        for i in range(max(1, retries)):
+            p = self.request(0x4D, "01", wait=wait)
+            if p is not None:
+                return p
+            if i < retries - 1:
+                time.sleep(0.7)
+        return None
 
     def battery(self):
         """读取电量。附带 raw 原始报文, 便于排查数值异常跳动。"""

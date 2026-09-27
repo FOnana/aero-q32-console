@@ -346,7 +346,10 @@ class Worker(QObject):
             try:
                 if self.dev is None:
                     self.status.emit({"state": "connecting"})
-                    self.log.emit("正在探测 SPP 串口…")
+                    # 蓝牙串口打开后链路未必就绪(实测可达 6 秒以上),
+                    # 探测要在窗口内反复握手, 所以这一步可能耗十几秒 —— 提前说清楚,
+                    # 免得用户以为卡死了。
+                    self.log.emit("正在建立蓝牙链路并探测设备…（首次连接可能需要十几秒，请稍候）")
                     dev = A.AeroQ32()
                     port = dev.open()
                     self.log.emit("已打开 %s%s" % (port, "  MAC " + dev.mac if dev.mac else ""))

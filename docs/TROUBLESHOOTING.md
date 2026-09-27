@@ -38,6 +38,26 @@ answers, the model probably speaks a different protocol. See [COMPATIBILITY.md](
 
 ---
 
+## The app keeps searching and never finds the earbuds
+
+**Most likely: the link simply needs longer than you expect.** Opening a Windows Bluetooth
+serial port returns immediately, but the RFCOMM connection behind it can take several seconds
+to come up - measured at **6.2 s** on one device. Data written during that window is silently
+dropped.
+
+Current builds retry the handshake for up to 10 seconds, so give discovery a moment before
+concluding it failed.
+
+**If it still never connects, check whether your model uses a custom SPP service.** Look at the
+device services (`Get-PnpDevice`, or Device Manager) for a name that is not the standard one -
+for example `JL_SPP` bound to a UUID like `EDF00000-EDFE-DFED-FEDF-EDFEDFEDFEDF`.
+
+Windows creates a COM port **only** for the standard SPP profile (`00001101-...`), so a vendor
+UUID has no COM port and cannot be reached by this tool.
+See [COMPATIBILITY.md](COMPATIBILITY.md).
+
+---
+
 ## "串口被占用" / port busy
 
 Something else holds the COM port. Most often it is **a second copy of this app**.
