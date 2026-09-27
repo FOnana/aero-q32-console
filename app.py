@@ -31,6 +31,9 @@ BG, PANEL, PANEL_HI = "#17181C", "#212329", "#2A2D35"
 BORDER, TEXT, MUTED = "#343841", "#E4E6EA", "#8A8F99"
 ACCENT, OK, WARN = "#FB3A1F", "#4CC38A", "#E5A00D"
 
+APP_TITLE = "Earbuds Console"   # 应用名; 连接后会自动加上识别到的设备名
+APP_TITLE_ZH = "蓝牙耳机控制台"
+
 MAX_LOG_LINES = 400
 LOW_BATTERY = 20          # 低电量阈值 % (可被配置覆盖)
 HEARTBEAT_SEC = 60        # 无变化时的心跳日志间隔 (可被配置覆盖)
@@ -591,7 +594,8 @@ class HotkeyDialog(QDialog):
 class Window(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("1MORE AERO Q32 · 控制台")
+        self._dev_name = None
+        self.setWindowTitle(APP_TITLE)
         # 演示模式(AERO_NODEV)只影响界面, 绝不写进生产日志,
         # 否则日志里会混入假数据, 排查真实问题时产生误导。
         self._demo = os.environ.get("AERO_NODEV") == "1"
@@ -635,10 +639,15 @@ class Window(QWidget):
         self.tick.start(1000)
 
         if os.environ.get("AERO_NODEV") == "1":
-            self.on_status({"state": "connected", "port": "COM1", "mac": "AABBCCDDEEFF"})
+            # 演示/截图模式: 不连设备, 用假设备名, 避免把真实型号写死进代码
+            self.on_status({"state": "connected", "port": "COM1", "mac": None})
+            self._dev_name = "Demo Earbuds"
+            self.lblDev.setText(self._dev_name)
+            self.setWindowTitle("%s · %s" % (self._dev_name, APP_TITLE))
+            self.tray.setToolTip(self._dev_name)
             self.on_battery({"left": 100, "right": 100, "case": 95})
             self.on_mode(1); self.on_connect(0)
-            for s in ("已打开 COM1  MAC AABBCCDDEEFF", "握手完成", "RX 电量   左100%   右100%   盒95%"):
+            for s in ("已打开 COM1", "握手完成", "RX 电量   左100%   右100%   盒95%"):
                 self.on_log(s)
         else:
             self.w.start()
@@ -652,7 +661,8 @@ class Window(QWidget):
         root = QVBoxLayout(page); root.setContentsMargins(16, 16, 16, 16); root.setSpacing(12)
 
         top = QHBoxLayout()
-        t = QLabel("1MORE AERO Q32"); t.setObjectName("big"); top.addWidget(t)
+        self.lblDev = QLabel(APP_TITLE); self.lblDev.setObjectName("big")
+        top.addWidget(self.lblDev)
         top.addSpacing(8)
         self.dot = QLabel("●"); self.dot.setStyleSheet("color:%s;font-size:16px;" % WARN); top.addWidget(self.dot)
         self.st = QLabel("连接中…"); self.st.setObjectName("muted"); top.addWidget(self.st)
@@ -770,7 +780,7 @@ class Window(QWidget):
     def _build_tray(self):
         icon = QIcon(res_path("icon.ico"))
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip("1MORE AERO Q32")
+        self.tray.setToolTip(APP_TITLE)
         m = QMenu()
         act_show = QAction("显示窗口", self); act_show.triggered.connect(self.show_normal)
         m.addAction(act_show); m.addSeparator()
@@ -842,8 +852,9 @@ class Window(QWidget):
         lo = min([v for v in (b.get("left"), b.get("right"), b.get("case")) if v is not None] or [100])
         self.menu_batt.setText("电量  左%s%%  盒%s%%  右%s%%" %
                                (b.get("left"), b.get("case"), b.get("right")))
-        self.tray.setToolTip("1MORE AERO Q32\n电量 左%s%% / 盒%s%% / 右%s%%"
-                             % (b.get("left"), b.get("case"), b.get("right")))
+        self.tray.setToolTip("%s\n电量 左%s%% / 盒%s%% / 右%s%%"
+                             % (self._dev_name or APP_TITLE,
+                                b.get("left"), b.get("case"), b.get("right")))
         self._last_data = time.time()
         if lo <= self.LOW and not self._low_warned:
             self._low_warned = True
@@ -906,6 +917,13 @@ class Window(QWidget):
         if state == "connected":
             self.dot.setStyleSheet("color:%s;font-size:16px;" % OK)
             self.st.setText("已连接" + ("  ·  " + s["port"] if s.get("port") else ""))
+            # 设备名从系统注册表读, 读不到就退回 MAC, 再不济用通用名
+            self._dev_name = A.device_name(s.get("mac")) or (s.get("mac") or None)
+            shown = self._dev_name or APP_TITLE
+            self.lblDev.setText(shown)
+            self.setWindowTitle(shown if shown == APP_TITLE
+                                else "%s · %s" % (shown, APP_TITLE))
+            self.tray.setToolTip(shown)
         elif state == "busy":
             self.dot.setStyleSheet("color:%s;font-size:16px;" % ACCENT); self.st.setText("串口被占用")
         elif state == "connecting":
@@ -1044,7 +1062,7 @@ if __name__ == "__main__":
         A.log().warning("检测到已有实例, 本次启动退出")
         QMessageBox.information(
             None, "已在运行",
-            "1MORE AERO Q32 控制台已经在运行了。\n\n"
+            "%s 已经在运行了。\n\n" % APP_TITLE +
             "同时开两个实例会互相抢占蓝牙串口和全局热键，"
             "导致其中一个连不上耳机。\n\n"
             "请从系统托盘图标（右下角）操作：右键可直接切换模式，"

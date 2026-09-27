@@ -828,3 +828,52 @@ def format_report(rep):
     for h in rep.get('hints', []):
         L.append('  - ' + h)
     return chr(10).join(L)
+
+# ============================ 设备名识别 ============================
+
+def device_name(mac):
+    '''由设备 MAC 查出系统记录的蓝牙设备友好名。
+
+    用途: 窗口标题 / 托盘提示 显示真实设备名, 而不是写死某个型号。
+    只读注册表, 不需要管理员权限; 查不到返回 None。
+    '''
+    if not mac:
+        return None
+    key = str(mac).upper().replace(':', '').replace('-', '')
+    if len(key) != 12:
+        return None
+    try:
+        import winreg
+    except Exception:
+        return None                      # 非 Windows
+
+    # 方法 A: 设备节点的 FriendlyName (最稳定, 无需管理员)
+    try:
+        base = 'SYSTEM' + chr(92) + 'CurrentControlSet' + chr(92) + 'Enum' + chr(92) + \
+               'BTHENUM' + chr(92) + 'DEV_' + key
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                sub = winreg.EnumKey(k, i)
+                try:
+                    with winreg.OpenKey(k, sub) as sk:
+                        v = winreg.QueryValueEx(sk, 'FriendlyName')[0]
+                        if v:
+                            return str(v)
+                except FileNotFoundError:
+                    continue
+    except Exception:
+        pass
+
+    # 方法 B: BTHPORT 下存的 Name (REG_BINARY, UTF-8, 末尾带 NUL)
+    try:
+        p = 'SYSTEM' + chr(92) + 'CurrentControlSet' + chr(92) + 'Services' + chr(92) + \
+            'BTHPORT' + chr(92) + 'Parameters' + chr(92) + 'Devices' + chr(92) + key
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, p) as k:
+            d, typ = winreg.QueryValueEx(k, 'Name')
+            if isinstance(d, bytes):
+                v = d.rstrip(b'\x00').decode('utf-8', 'replace')
+                if v:
+                    return v
+    except Exception:
+        pass
+    return None

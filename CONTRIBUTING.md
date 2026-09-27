@@ -38,6 +38,43 @@ The `probe` command only issues read-only queries, so it is safe to run and past
 * Comments explain *why*, not *what*. Note anything that looks wrong but is actually correct
   (for example device-side quirks) so nobody "fixes" it later.
 
+## Building a standalone exe
+
+```bat
+pip install pyinstaller
+python -m PyInstaller --onefile --windowed --icon icon.ico ^
+  --add-data "icon.ico;." --name AeroQ32 app.py
+```
+
+### If the build dies with an OpenBLAS memory error
+
+```
+OpenBLAS error: Memory allocation still failed after 10 retries, giving up.
+PyInstaller.isolated._parent.SubprocessDiedError
+```
+
+PyInstaller inspects installed packages while discovering hooks, which can end up importing
+numpy/OpenBLAS. OpenBLAS sizes its buffers by CPU count, so on a machine with many cores and a
+small page file it can run out of memory. Two fixes:
+
+**1. Cap the thread count (quick)**
+
+```bat
+set OPENBLAS_NUM_THREADS=1
+set OMP_NUM_THREADS=1
+```
+
+**2. Build in a clean virtualenv (recommended for releases)**
+
+It also produces a smaller exe, since numpy/scipy are not pulled in:
+
+```bat
+python -m venv .buildenv
+.buildenv\Scripts\pip install pyserial PySide6 pyinstaller
+.buildenv\Scripts\python -m PyInstaller --onefile --windowed --icon icon.ico ^
+  --add-data "icon.ico;." --name AeroQ32 app.py
+```
+
 ## Architecture
 
 ```
