@@ -1,0 +1,9 @@
+# Core
+pyserial>=3.5
+
+# GUI (optional if you only use the CLI)
+PySide6>=6.5
+
+# Development
+# ruff
+# pytest

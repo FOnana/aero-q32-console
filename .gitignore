@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.venv/
+venv/
+
+# PyInstaller
+*.spec
+
+# Runtime data
+data/
+portable_data/
+*.log
+
+# NEVER commit vendor artifacts (see NOTICE.md)
+*.apk
+*.aab
+*.dex
+*.arsc
+*.so
+apk/
+src/
+decompiled/
+jadx/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

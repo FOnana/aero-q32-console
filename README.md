@@ -1,0 +1,302 @@
+# AERO Q32 Console
+
+> Windows 上的 Jieli 方案真无线耳机控制台 —— 不用手机，也能看电量、切降噪、调音效。
+> 在 **1MORE AERO Q32** 上开发并验证。
+
+![界面截图](docs/screenshot.png)
+
+<div align="center">
+
+`Python 3.9+` · `Windows 10/11` · `MIT` · 非官方项目
+
+</div>
+
+---
+
+## 这是什么
+
+这个项目的耳机官方伴侣 App **只有安卓版**。我把它在 Windows 上原生重写了一遍，让你
+**不用掏出手机**就能：
+
+- 看左右耳和充电盒的实时电量
+- 切换 8 种降噪模式（含全局热键）
+- 调整风格音效、切换连接模式（标准 / 娱乐 / LDAC）
+- 托盘常驻，右键就能操作
+
+它通过蓝牙 SPP（串口）与耳机通信。协议是我**观察本机与耳机之间的链路、并在实机上逐条
+验证**整理出来的，[完整协议文档在这里](docs/PROTOCOL.md)。
+
+本项目是**独立的第三方实现**，与耳机厂商没有任何关系。详见 [NOTICE.md](NOTICE.md)。
+
+---
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| **电量** | 左耳 / 充电盒 / 右耳，圆环动画显示 |
+| **降噪** | 8 种模式，3 个大按钮 + 5 个快捷标签 |
+| **风格音效** | 独立的声效预设，与降噪互不影响 |
+| **连接模式** | 标准 / 娱乐 / LDAC |
+| **全局热键** | 可完全自定义，默认 Ctrl+Alt+1/2/3 |
+| **托盘常驻** | 关窗口最小化到托盘，右键直接切模式 |
+| **设备自检** | 只发只读命令，探测你这台设备支持哪些功能 |
+| **原始命令控制台** | 带安全闸的调试入口（详见下文） |
+| **低电量提醒** | 低于阈值弹托盘通知 |
+| **环境诊断** | 一条命令输出排障所需全部信息 |
+
+---
+
+## 环境要求
+
+- Windows 10 / 11（64 位）
+- Python 3.9 或更高
+- 耳机**已在系统蓝牙设置里完成配对**
+
+> Windows 会在配对后为该耳机的 SPP 服务创建一个虚拟串口。本项目通过**设备硬件 ID**
+> 自动识别这个端口，从不猜 COM 号，所以换电脑、重新配对都不会连错。
+
+---
+
+## 安装
+
+```bash
+git clone https://github.com/<你的用户名>/aero-q32-console.git
+cd aero-q32-console
+pip install -r requirements.txt
+```
+
+只想要命令行、不要图形界面：
+
+```bash
+pip install pyserial    # 不需要 PySide6
+```
+
+---
+
+## 使用
+
+### 图形界面
+
+```bash
+python app.py
+```
+
+### 命令行
+
+```bash
+python aero_cli.py doctor           # 环境诊断（出问题先跑这个）
+python aero_cli.py battery          # 查看电量
+python aero_cli.py mode             # 查询降噪模式
+python aero_cli.py mode strong      # 切换降噪模式
+python aero_cli.py sound 5          # 设置风格音效
+python aero_cli.py connect ldac     # 切换连接模式
+python aero_cli.py probe            # 探测设备支持哪些命令（只读）
+python aero_cli.py json             # 输出 JSON，方便脚本消费
+```
+
+**退出码**：`0` 成功 · `1` 出错 · `2` 未找到设备 · `3` 被安全闸拦截
+
+**降噪别名**：`off` `strong` `mild` `transparent` `wnr` `passthrough` `voice` `adaptive`
+
+**连接别名**：`standard` `entertainment` `ldac`
+
+可选参数：`--port COM6` 指定串口 · `--mac AABBCCDDEEFF` 指定设备
+
+### 便携模式（绿色版）
+
+```bat
+set AEROQ32_DATA_DIR=%~dp0data
+python app.py
+```
+
+配置和日志放在程序目录，不写 `%LOCALAPPDATA%`。
+
+---
+
+## 配置
+
+配置文件位于 `%LOCALAPPDATA%\AeroQ32\settings.json`：
+
+```json
+{
+  "hotkeys": [
+    {"mode": 1, "ctrl": true, "alt": true, "shift": false, "key": "1"},
+    {"mode": 0, "ctrl": true, "alt": true, "shift": false, "key": "2"},
+    {"mode": 3, "ctrl": true, "alt": true, "shift": false, "key": "3"}
+  ],
+  "low_battery": 20,
+  "heartbeat_sec": 60
+}
+```
+
+界面右上角「热键设置」可以直接改，不用手写 JSON。
+
+---
+
+## 兼容性
+
+- ✅ **已验证**：1MORE AERO Q32（杰理方案）——电量、8 种降噪、连接模式、风格音效全部可用
+- 🤔 **可能可用**：其他杰理方案的耳机（帧格式和命令码是芯片级而非型号级）
+- ❌ **不可用**：恒玄(BES) / 络达(Airoha) / 蓝讯(Bluetrum) / 高通 GAIA 等其他方案
+
+**不同型号支持的命令并不相同**，用这个命令看你的设备实际支持什么：
+
+```bash
+python aero_cli.py probe
+```
+
+详细说明见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+
+---
+
+## ⚠️ 安全说明
+
+### 原始命令控制台
+
+界面里的「原始命令」卡片可以直接发送任意命令帧。它有一道**硬性安全闸**：
+
+| 类别 | 处理 |
+|---|---|
+| 固件刷写 / 不可逆删除类命令 | **永久拦截**，即使勾选"解锁"也照样拦截，代码里没有绕过路径 |
+| 只读查询命令 | 始终放行 |
+| 本项目实测验证过的写命令 | 放行 |
+| 其它未知命令 | 默认拦截，需手动解锁 |
+
+**请不要用它刷固件。** 用逆向出来的协议刷固件可能让耳机永久变砖。升级固件请用官方 App。
+
+### 其它
+
+- 本项目**没有任何网络代码**，不收集、不上传任何数据
+- 只在本地写入两个文件：`settings.json` 和 `logs/aero_q32.log`
+
+---
+
+## 常见问题
+
+<details>
+<summary><b>提示找不到耳机 / 未找到可应答的串口</b></summary>
+
+先跑 `python aero_cli.py doctor`，它会告诉你具体是哪种情况。
+
+- 只有本机传入口（硬件 ID 含 `LOCALMFG`）→ 耳机没配对，或该型号不提供 SPP
+- 完全没有任何蓝牙串口 → 蓝牙没开 / 没配对 / 适配器用的是第三方驱动栈
+
+第三方驱动栈是常见原因，在设备管理器里把蓝牙适配器换成微软自带驱动即可。
+</details>
+
+<details>
+<summary><b>提示「串口被占用」</b></summary>
+
+多半是**另一个副本还在后台跑着**。看右下角托盘图标，右键选「退出」。
+桌面窗口关了不代表程序退出了——它会最小化到托盘。
+</details>
+
+<details>
+<summary><b>切了降噪模式但好像没生效</b></summary>
+
+两种情况是**设备的正常行为**，不是故障：
+
+1. 模式切换是异步的，立刻回读可能读到旧值（程序会自动轮询直到稳定）
+2. 「风噪降低」是降噪的子模式——降噪关着的时候设它是无效的，设备会自己退回
+
+程序会在日志里如实写明「设备未采纳」，不会假装成功。
+</details>
+
+<details>
+<summary><b>切到 LDAC 后断连十几秒</b></summary>
+
+正常现象。切换连接模式会重建 A2DP 链路，控制通道随之中断约 10 秒，程序会自动重连。
+
+另外 **Windows 本身不支持 LDAC**，在电脑上切这个选项不会提升本机音质；
+该设置存在耳机里，等它之后连 LDAC 音源（比如手机）时才生效。
+</details>
+
+<details>
+<summary><b>电量数字偶尔跳来跳去</b></summary>
+
+每次电量变化都会把**原始报文**写进日志，方便定位：
+
+```
+%LOCALAPPDATA%\AeroQ32\logs\aero_q32.log
+```
+
+如果报文结构和 [协议文档](docs/PROTOCOL.md) 描述的不一样，欢迎开 issue 附上那一行。
+充电盒电量字节还没有在多种充电状态下验证过。
+</details>
+
+更多问题见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
+
+---
+
+## 项目结构
+
+```
+aero_q32.py      协议 + 传输 + 安全闸 + 配置   （不依赖 Qt，可单独使用）
+app.py           PySide6 图形界面
+aero_cli.py      命令行入口
+tests/           无需硬件的自动化测试
+docs/            协议文档 / 兼容性 / 排障
+```
+
+协议层刻意做成**不依赖界面框架**的，所以可以在没有显示器、没有耳机的情况下完整测试。
+
+---
+
+## 参与贡献
+
+欢迎 PR 和 issue，尤其是**设备兼容性上报**——我没有别的型号可以测。
+
+上报时请附上：
+
+```bash
+python aero_cli.py doctor    # 环境信息
+python aero_cli.py probe     # 设备支持哪些命令（只读，安全）
+```
+
+⚠️ **本项目不接受任何厂商二进制或反编译产物**（`.apk` / `.dex` / 反编译源码 / 固件镜像）。
+详见 [NOTICE.md](NOTICE.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+---
+
+## 许可证
+
+[MIT](LICENSE)
+
+## 免责声明
+
+本项目为**独立第三方实现**，与任何耳机厂商均无隶属、授权或背书关系。
+所有产品名称与商标归各自所有者，此处仅用于**标识兼容性**。
+
+软件按「原样」提供，不附带任何担保。使用风险自负，尤其是原始命令控制台。
+
+---
+
+---
+
+## English
+
+**A community Windows controller for Jieli-based true-wireless earbuds**, developed and
+verified against the 1MORE AERO Q32.
+
+The vendor companion app is Android-only. This project reimplements the same device control
+natively on Windows - battery levels, 8 ANC modes, sound presets and link modes - over the
+Bluetooth SPP link, with a documented protocol.
+
+```bash
+pip install -r requirements.txt
+python app.py                  # GUI
+python aero_cli.py doctor      # diagnostics (start here if something is wrong)
+python aero_cli.py battery     # battery levels
+python aero_cli.py probe       # which commands your device answers (read-only)
+```
+
+* Windows 10/11, Python 3.9+. Earbuds must already be **paired** in Windows.
+* The serial port is discovered from the device hardware ID - never a hard-coded COM number.
+* Works with Jieli-based earbuds. Other chipsets (BES, Airoha, Bluetrum, Qualcomm GAIA) use
+  different protocols and will not work.
+* Firmware-flashing and irreversible-delete commands are **hard-blocked in code**, even when
+  the raw console is unlocked.
+
+This is an **unofficial project**, not affiliated with or endorsed by any vendor.
+See [NOTICE.md](NOTICE.md). Licensed under [MIT](LICENSE).

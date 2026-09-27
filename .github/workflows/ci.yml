@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        python-version: ["3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyserial pytest ruff
+
+      - name: Lint
+        run: ruff check --select F,B,E9 .
+
+      - name: Syntax check GUI module (PySide6 not installed in CI)
+        run: python -c "import ast;ast.parse(open('app.py',encoding='utf-8').read())"
+
+      - name: Run tests (hardware-free)
+        run: pytest -q
+
+      - name: Guard against committed vendor artifacts
+        shell: bash
+        run: |
+          bad=$(git ls-files | grep -Ei "\.(apk|aab|dex|arsc|so)$" || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Vendor artifacts must not be committed:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "no vendor artifacts found"
