@@ -67,6 +67,9 @@ SPP_UUID = "00001101"   # 串口服务 UUID
 VAR_Q32 = "q32"
 VAR_LE = "le"
 VARIANTS = {VAR_Q32: "AERO Q32 大端封装", VAR_LE: "小端封装 (如 S20PRO)"}
+#
+# 变体只影响"怎么解析收到的帧", 不影响安全闸: 小端设备的请求帧格式也已被验证
+# (同一套请求帧它应答了 9 条命令), 所以写命令照常放行, 结果以回读为准。
 
 
 # ============================ 帧编解码 ============================
@@ -369,6 +372,7 @@ class AeroQ32:
         self.ser = None
         # 首次收到合法帧后确定; None = 还没见过帧(按 VAR_Q32 处理)
         self.variant = None
+        self._unverified_noted = False
 
     # ---- 生命周期 ----
     def open(self):
@@ -499,22 +503,33 @@ class AeroQ32:
 
     # ---- 写命令闸门 ----
     @property
-    def readonly(self):
-        """小端变体(实测 1MORE S20PRO)目前只跑得通只读查询。"""
+    def writes_unverified(self):
+        """这台设备的**写入**方向还没验证过(实测小端变体如 1MORE S20PRO)。
+
+        注意区别: 它的**请求帧格式是验证过的** —— 对同一套请求帧, 它正确应答了
+        9 条不同命令(0x4D/0x4E/0x6C/0x6A/0x3C/0x54/0x77/0x83/0x87)。
+        没验证的只是"发过去的设置会不会生效"。
+
+        所以这里**不拦截**, 只用于界面提示和首次写入时记一笔日志。
+        真正的变砖路径(OTA/不可逆删除)由 DENY_COMMANDS 单独焊死, 与此无关。
+        """
         return self.variant == VAR_LE
 
     def require_write(self, cmd):
         """写命令放行检查, 不放行直接抛 WriteBlocked。
 
         set_listen_mode / set_preset_sound / set_connect_option 这几个方法
-        以前是**直接 send** 的, 绕过了安全闸 —— 小端设备上点按钮或按热键
-        照样会把命令发出去。现在它们和 send_raw 走同一道门。
-        Q32 上这三条命令本来就都在 SAFE_WRITE 里, 行为不变。
+        以前是**直接 send** 的, 绕过了安全闸 —— 点按钮或按热键照样会把命令
+        发出去。现在它们和 send_raw 走同一道门, DENY_COMMANDS 对它们同样生效。
         """
         ok, why = guard_command(cmd, variant=self.variant or VAR_Q32)
         if not ok:
             log().warning("拦截写命令 0x%02X: %s", cmd, why)
             raise WriteBlocked(why)
+        if self.writes_unverified and not self._unverified_noted:
+            self._unverified_noted = True
+            log().warning("首次向未验证写入的设备发送 0x%02X: 该方向的帧格式没验证过,"
+                          " 是否生效以设备回读为准", cmd)
 
     def send_raw(self, cmd, payload=b"", unlocked=False, wait=2.0):
         """原始命令发送(控制台用)。强制经过安全闸。
@@ -658,18 +673,14 @@ SAFE_WRITE = {
 def guard_command(cmd, unlocked=False, variant=VAR_Q32):
     """安全闸唯一入口。返回 (是否放行, 说明)。
 
-    variant 为 VAR_LE 时, 写命令默认拦截 —— 那种设备的**请求**帧封装
-    还没有验证过(只验证了它能正确**应答**), 拿真耳机去试写命令风险不对等。
+    变体(variant)不影响放行判断: 小端设备的**请求**帧格式已经被验证过 ——
+    对同一套请求帧它正确应答了 9 条不同命令。没验证的只是写入是否生效,
+    那不是安全问题(命令本身非破坏性), 如实报告结果即可。
     """
     if cmd in DENY_COMMANDS:
         return False, "⛔ 永久禁止: %s" % DENY_COMMANDS[cmd]
     if cmd in READ_COMMANDS:
         return True, "只读查询: %s" % READ_COMMANDS[cmd]
-    if variant == VAR_LE:
-        if unlocked:
-            return True, "⚠ 小端变体设备, 写命令帧格式未经验证 (危险模式已解锁)"
-        return False, ("⚠ 该设备使用小端帧封装 (如 1MORE S20PRO), 目前只支持只读查询。"
-                       "写命令帧格式尚未验证, 已拦截; 确需发送请先解锁危险模式")
     if cmd in SAFE_WRITE:
         return True, "已实测写命令: %s" % SAFE_WRITE[cmd]
     if unlocked:

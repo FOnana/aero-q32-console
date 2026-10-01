@@ -781,12 +781,12 @@ class Window(QWidget):
         top.addSpacing(8)
         self.dot = QLabel("●"); self.dot.setStyleSheet("color:%s;font-size:16px;" % WARN); top.addWidget(self.dot)
         self.st = QLabel("连接中…"); self.st.setObjectName("muted"); top.addWidget(self.st)
-        # 只读徽标: 默认隐藏, 检测到只读设备才亮
-        self.roBadge = QLabel("只读")
-        self.roBadge.setStyleSheet("color:%s;border:1px solid %s;border-radius:4px;"
-                                   "padding:0px 6px;font-size:11px;" % (WARN, WARN))
-        self.roBadge.setVisible(False)
-        top.addWidget(self.roBadge)
+        # 提示徽标: 默认隐藏, 检测到"写入未验证"的设备才亮
+        self.warnBadge = QLabel("写入未验证")
+        self.warnBadge.setStyleSheet("color:%s;border:1px solid %s;border-radius:4px;"
+                                     "padding:0px 6px;font-size:11px;" % (WARN, WARN))
+        self.warnBadge.setVisible(False)
+        top.addWidget(self.warnBadge)
         top.addStretch(1)
         self.stat = QLabel(""); self.stat.setStyleSheet("color:%s;font-size:11px;" % MUTED); top.addWidget(self.stat)
         top.addSpacing(8)
@@ -804,15 +804,15 @@ class Window(QWidget):
         self.btnRe.clicked.connect(lambda: self.w.reconnect()); top.addWidget(self.btnRe)
         root.addLayout(top)
 
-        # 只读说明条: 默认隐藏。用整条说明代替零散 tooltip ——
-        # "为什么点不动"这件事要一次说清, 而不是让用户逐个按钮去悬停。
-        self.roBanner = QLabel("")
-        self.roBanner.setWordWrap(True)
-        self.roBanner.setStyleSheet("color:%s;background:%s;border:1px solid %s;"
-                                    "border-radius:6px;padding:8px 10px;font-size:12px;"
-                                    % (WARN, PANEL_HI, WARN))
-        self.roBanner.setVisible(False)
-        root.addWidget(self.roBanner)
+        # 说明条: 默认隐藏, 用整条说明代替零散的逐按钮 tooltip。
+        # 注意它说明的是"可能不生效", 不是"不能用" —— 控件始终是可点的。
+        self.warnBanner = QLabel("")
+        self.warnBanner.setWordWrap(True)
+        self.warnBanner.setStyleSheet("color:%s;background:%s;border:1px solid %s;"
+                                      "border-radius:6px;padding:8px 10px;font-size:12px;"
+                                      % (WARN, PANEL_HI, WARN))
+        self.warnBanner.setVisible(False)
+        root.addWidget(self.warnBanner)
 
         c0 = Card("电  量")
         rings = QHBoxLayout(); rings.setSpacing(36); rings.addStretch(1)
@@ -1049,7 +1049,7 @@ class Window(QWidget):
     def on_caps(self, off):
         """按设备**实际应答能力**收放面板。
 
-        设备根本不实现的查询, 把面板留着只会误导 —— 一整块点不动、又没有数值的
+        设备根本不实现的查询, 把面板留着只会误导 —— 一整块永远读不出数值的
         降噪按钮, 看起来就像程序坏了。所以直接收起来, 并在日志里说清原因。
 
         判定来自两条路: 轮询连续无应答, 或用户点了「设备自检」。见 Worker._poll_ok。
@@ -1068,13 +1068,15 @@ class Window(QWidget):
                         % POLL_LABELS.get(tag, tag))
 
     def _apply_variant(self, var):
-        """小端帧变体(实测 1MORE S20PRO)只跑得通只读查询。
+        """小端帧变体(实测 1MORE S20PRO): 写入方向未验证, 但控件**照常可点**。
 
-        写命令的**请求**帧格式没验证过 —— 只验证了它能正确应答。
-        这里把写类控件禁掉, 而不是让用户点了没反应:
-        "点了没反应"比"禁用了并说明原因"难排查得多。
+        这里不禁用任何东西, 理由:
+          * 请求帧格式是验证过的 —— 对同一套请求帧, 设备正确应答了 9 条不同命令;
+          * 没验证的只是"设置会不会生效", 那不属于安全问题;
+          * 设备不采纳时日志会如实写明「设备未采纳」, 用户当场就知道,
+            不需要靠"点不动"去猜。
 
-        协议层的 require_write() 还有一道兜底, 所以就算绕开界面(热键)也发不出去。
+        真正的变砖路径(OTA / 不可逆删除)由协议层 DENY_COMMANDS 焊死, 与界面无关。
         """
         if var not in (A.VAR_Q32, A.VAR_LE):
             return                      # 还没收到过帧, 不做判断
@@ -1082,25 +1084,26 @@ class Window(QWidget):
         if le == getattr(self, "_le_mode", None):
             return                      # 状态没变, 不重复动界面
         self._le_mode = le
-        tip = ("该设备使用小端帧封装（如 1MORE S20PRO），写命令格式尚未验证，"
-               "已切换为只读：下面的按钮只表示当前状态，点不动")
+        tip = ("该设备写入方向的帧格式未经验证，设置不一定生效；"
+               "设备未采纳时日志会写明") if le else ""
         for w in (list(getattr(self, "big", []))
                   + list(getattr(self, "chips", []))
                   + list(getattr(self, "conn", []))):
-            w.setEnabled(not le)
-            w.setToolTip(tip if le else "")
+            w.setEnabled(True)          # 可点。不生效由回读来暴露, 不靠禁用去猜
+            w.setToolTip(tip)
         if hasattr(self, "soundCombo"):
-            self.soundCombo.setEnabled(not le)
-            self.soundCombo.setToolTip(tip if le else "")
-        self.roBadge.setVisible(le)
-        self.roBanner.setVisible(le)
+            self.soundCombo.setEnabled(True)
+            self.soundCombo.setToolTip(tip)
+        self.warnBadge.setVisible(le)
+        self.warnBanner.setVisible(le)
         if le:
-            self.roBanner.setText(
-                "只读模式 · 这台设备用了小端帧封装（如 1MORE S20PRO）。"
-                "已确认它能正确应答查询，但写命令的帧格式没有验证过 —— "
-                "去验证意味着往一副没法替换的真耳机里写数据，风险不对等。"
-                "所以下面的开关只显示当前状态，点不动；电量等查询照常使用。")
-            self.on_log("⚠ 检测到小端帧封装设备（如 1MORE S20PRO）：已切换为只读模式")
+            self.warnBanner.setText(
+                "写入未验证 · 这台设备用了小端帧封装（如 1MORE S20PRO）。"
+                "它能正确应答本工具的查询，但设置发过去是否生效没有验证过。"
+                "不影响使用：设备没采纳时日志会如实写明「设备未采纳」，不会假装成功。"
+                "OTA 刷写与不可逆删除仍然永久禁止。")
+            self.on_log("⚠ 检测到小端帧封装设备（如 1MORE S20PRO）：写入方向未经验证")
+            self.on_log("   控件照常可点；设备是否采纳请看日志里的回读结果")
 
     def on_status(self, s):
         state = s.get("state")

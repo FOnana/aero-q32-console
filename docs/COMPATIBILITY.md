@@ -5,7 +5,7 @@
 | Device | Chipset family | Status |
 |--------|----------------|--------|
 | 1MORE AERO Q32 | Jieli | Fully working: battery, all 8 ANC modes, link mode, sound preset |
-| 1MORE S20 Pro (open-ear clip) | Jieli | **Read-only**: battery works. Writes disabled - see below |
+| 1MORE S20 Pro (open-ear clip) | Jieli | Battery and all queries work. Writes enabled but **unverified** - see below |
 
 ## The little-endian variant
 
@@ -33,20 +33,28 @@ Same command, same length, different byte - so it more likely tags the frame ori
 
 **Because it cannot be verified, the parser falls back to structural checks** for this
 variant: a fixed 3-byte prefix, a valid trailer, and a sane length. Random noise is very
-unlikely to satisfy all three, but the guarantee is weaker than a real checksum, which is
-one more reason writes stay off.
+unlikely to satisfy all three, but the guarantee is weaker than a real checksum. That is a
+*reliability* caveat, not a safety one - it only affects how confidently a frame is accepted.
 
-### Why writes are disabled
+### Writes are enabled - but unverified
 
-The S20 Pro **replies correctly** to this project's request frames, so reads are safe and
-useful. That does not mean the *request* framing is correct in the other direction - the
-device may simply be ignoring fields it does not need.
+The S20 Pro **replies correctly** to this project's request frames. That is stronger evidence
+than it first sounds: nine different commands (`0x4D`, `0x4E`, `0x6C`, `0x6A`, `0x3C`, `0x54`,
+`0x77`, `0x83`, `0x87`) were sent using this exact framing, and all nine came back with the
+right reply. The device parses these request frames and acts on the command byte.
 
-Testing that guess means writing to a real pair of earbuds that cannot be replaced. The
-asymmetry is not worth it, so `require_write()` refuses and the GUI disables the controls.
+What is still unverified is only whether a *write* takes effect - a different question, and
+not a safety one. Every command in `SAFE_WRITE` is non-destructive (volume, playback,
+find-my-earbuds, link mode, sound preset), and the commands that could actually brick a
+device (`0x71`/`0x72`/`0x73` OTA, `0x49` irreversible delete) are blocked by `DENY_COMMANDS`
+whatever the framing is.
 
-Reading works because the device answers; writing waits until someone can verify it on
-hardware that is expendable.
+So the gate does **not** branch on the frame variant. Byte order is a transport detail; it
+must not carry a hidden second policy. Writes go out, and if the device does not accept one,
+the app says so in the log instead of pretending it worked.
+
+The GUI shows a "writes unverified" badge and banner on such devices and leaves every control
+clickable.
 
 ### No ANC on the S20 Pro
 

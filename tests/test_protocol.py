@@ -152,12 +152,21 @@ class TestLittleEndianVariant:
         frames, _ = feed([bytes.fromhex("0101004d010000024301")])
         assert frames == []
 
-    def test_le_writes_blocked_by_default(self):
-        # The request-frame format for this variant is unverified: reads are safe,
-        # writes would be tested on a real pair of earbuds.
+    def test_le_writes_allowed(self):
+        # The REQUEST framing is verified: the device answered nine different commands
+        # sent with it. Only whether a write takes effect is unverified, and that is not
+        # a safety property - every entry in SAFE_WRITE is non-destructive.
         for cmd in A.SAFE_WRITE:
             ok, why = A.guard_command(cmd, variant=A.VAR_LE)
-            assert ok is False, why
+            assert ok is True, why
+
+    def test_variant_never_changes_the_gate(self):
+        # The framing must not carry a hidden second policy. Byte order is a transport
+        # detail; the allow/deny decision has to be identical for both variants.
+        for cmd in (list(A.READ_COMMANDS) + list(A.SAFE_WRITE)
+                    + list(A.DENY_COMMANDS) + [0xAA]):
+            assert (A.guard_command(cmd, variant=A.VAR_LE)[0]
+                    == A.guard_command(cmd, variant=A.VAR_Q32)[0]), hex(cmd)
 
     def test_le_reads_still_allowed(self):
         for cmd in A.READ_COMMANDS:

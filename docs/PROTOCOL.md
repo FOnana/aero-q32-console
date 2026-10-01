@@ -80,8 +80,9 @@ Evidence that it is not a content check: the reply to `0x4E` always carried `0x8
 different byte - so it likely encodes the frame origin (reply vs. notification).
 
 Since it cannot be verified, `VAR_LE` frames are accepted on structure alone: fixed 3-byte
-prefix, valid trailer, sane length. That is weaker than a checksum, so this variant is
-**read-only** - see [COMPATIBILITY.md](COMPATIBILITY.md).
+prefix, valid trailer, sane length. That is weaker than a checksum - a reliability caveat,
+not a safety one. It does not restrict what can be sent; see
+[COMPATIBILITY.md](COMPATIBILITY.md) for how writes are handled on this variant.
 
 ## Resynchronisation
 

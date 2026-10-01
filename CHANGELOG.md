@@ -9,8 +9,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 * Support for the **little-endian frame variant** used by the 1MORE S20 Pro. Its header
   integers are byte-swapped and its byte 8 is not a checksum, so the parser now reads the
-  trailer first and picks the byte order from it. Battery reads work on this variant;
-  writes are refused. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+  trailer first and picks the byte order from it. Battery reads work on this variant,
+  and writes are sent too - see the gate change below. See
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 * `WriteBlocked` exception and `AeroQ32.require_write()`, plus a `variant` field on the CLI
   `json` output.
 
@@ -34,10 +35,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   Capability comes from polling (consecutive non-answers) or from the self-test button.
   Non-answers are only attributed to a feature while the link is demonstrably alive, so a
   dropped connection is never mistaken for an unsupported feature.
-* Read-only devices show a badge and an explanation banner rather than silently disabled
-  controls.
-* The GUI disables write controls when it detects the little-endian variant, rather than
-  letting a click do nothing.
+* **The gate no longer branches on the frame variant.** It briefly refused writes on the
+  little-endian variant, on the theory that only the *reply* framing had been proven. That
+  reasoning was wrong: nine different commands (`0x4D`, `0x4E`, `0x6C`, `0x6A`, `0x3C`,
+  `0x54`, `0x77`, `0x83`, `0x87`) were answered when sent with this exact request framing,
+  so the request framing is proven too. What is unproven is only whether a write takes
+  effect, which is not a safety property: every entry in `SAFE_WRITE` is non-destructive.
+  A transport detail must not carry a hidden second policy. A test now pins that invariant.
+* Such devices show a "writes unverified" badge and banner; every control stays clickable.
 * `extract()` now returns `(sof, cmd, payload, variant)` - the tuple gained a field.
 
 ## [1.0.0] - unreleased
