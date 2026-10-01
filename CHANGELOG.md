@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - unreleased
+## [1.1.0] - 2026-10-01
 
 ### Added
 
@@ -52,7 +52,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 * Such devices show a "writes unverified" badge and banner; every control stays clickable.
 * `extract()` now returns `(sof, cmd, payload, variant)` - the tuple gained a field.
 
-## [1.0.0] - unreleased
+## [1.0.0] - 2026-09-27
 
 First public release. Reconstructed from an internal working tool with the following changes:
 
