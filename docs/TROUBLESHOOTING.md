@@ -58,6 +58,42 @@ See [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ---
 
+## "The port exists but cannot be opened"
+
+Symptom: `python aero_cli.py ports` lists a remote device port, but connecting fails with:
+
+```
+could not open port COM3: FileNotFoundError(2, ...)
+The port COM3 does not exist.
+```
+
+**Cause: a stale Bluetooth modem still holds that COM number.** Check:
+
+```powershell
+Get-ItemProperty HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM
+```
+
+If two `\Device\BthModemN` entries map to the **same** COM number, opening it can resolve to
+the dead one and fail:
+
+```
+\Device\BthModem0 -> COM3     <- stale, device no longer exists
+\Device\BthModem4 -> COM3     <- the real earbuds
+\Device\BthModem5 -> COM4
+```
+
+**Fixes, in order of effort:**
+
+1. **Reboot.** Clears stale modem entries and reassigns ports. Usually enough.
+2. Device Manager -> View -> **Show hidden devices** -> Ports -> uninstall the greyed-out
+   "Standard Serial over Bluetooth link" entries.
+3. Remove the earbuds in Bluetooth settings and **pair again** - Windows assigns a fresh COM
+   number.
+
+This is a Windows Bluetooth port-allocation problem, not a fault in this tool.
+
+---
+
 ## "串口被占用" / port busy
 
 Something else holds the COM port. Most often it is **a second copy of this app**.

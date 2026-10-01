@@ -133,19 +133,31 @@ def extract(buf, stats=None):
 # ============================ 端口发现 ============================
 
 def _parse_hwid(hwid):
-    """从 hwid 解析 (是否远端设备口, 设备MAC)。尽量兼容不同 Windows/驱动写法。"""
-    h = (hwid or "").upper()
-    r"""远端设备口形如:
-       BTHENUM\{00001101-...}_VID&0001xxxx_PID&xxxx\9&...&AABBCCDDEEFF_C00000000
-       本机传入口形如:
-       BTHENUM\{00001101-...}_LOCALMFG&0000\9&...&000000000000_00000002
+    """从 hwid 解析 (是否远端设备口, 设备MAC)。
+
+    判别依据是**地址**, 不是 hwid 里的 LOCALMFG 字样:
+      * 本机传入口的地址恒为 000000000000
+      * 真实设备口带着设备自己的 MAC
+
+    ⚠ 曾经写错过: 当时用 "hwid 含 LOCALMFG 就当成本机口"。那是错的 ——
+      部分设备不发布 PnP(VID/PID) 记录, Windows 会用 LOCALMFG&xxxx 顶上,
+      但地址仍是真实 MAC。这类设备会被**整类漏掉**, 表现就是"搜不到耳机"。
+      实测: 1MORE S20PRO 用 LOCALMFG&0046 + 真实 MAC, 就被误判成了本机口。
+
+    三种真实写法:
+      带 PnP:   BTHENUM\{00001101-...}_VID&000105D6_PID&000A\...&<MAC>_...
+      无 PnP:   BTHENUM\{00001101-...}_LOCALMFG&0046\...&<MAC>_...
+      本机传入: BTHENUM\{00001101-...}_LOCALMFG&0000\...&000000000000_...
     """
-    remote = ("BTHENUM" in h) and ("LOCALMFG" not in h)
-    mac = None
+    h = (hwid or "").upper()
+    if "BTHENUM" not in h:
+        return False, None
     m = re.search(r"&([0-9A-F]{12})[_\\]", h + "\\")
-    if m:
-        mac = m.group(1)
-    return remote, mac
+    mac = m.group(1) if m else None
+    if mac is None:
+        # 解析不出地址时按远端处理, 交给握手去验证, 宁滥勿缺
+        return True, None
+    return (mac != "000000000000"), mac
 
 
 def list_spp_ports():
@@ -203,7 +215,11 @@ def probe_port(port, timeout=1.0, settle=10.0):
     try:
         s = serial.Serial(port, 9600, timeout=0.3, write_timeout=2)
     except Exception as e:
-        return "busy" if _is_busy(e) else "no"   # 关键: 与"没这个设备"区分开
+        if _is_busy(e):
+            return "busy"                        # 被别的进程占用
+        if _is_ghost(e):
+            return "ghost"                       # 端口"存在"但设备对象没了
+        return "no"
     try:
         s.reset_input_buffer()
         end = time.time() + max(settle, timeout)
@@ -244,15 +260,23 @@ def discover(timeout=2.0, prefer_port=None, prefer_mac=None, settle=10.0):
     if prefer_mac:
         want = str(prefer_mac).upper().replace(":", "")
         cands.sort(key=lambda c: 0 if c["mac"] == want else 1)
-    busy = []
+    busy, ghost = [], []
     for c in cands:
         r = probe_port(c["device"], timeout=1.0, settle=settle)
         if r == "ok":
             return c["device"], c["mac"]
         if r == "busy":
             busy.append(c["device"])
+        elif r == "ghost":
+            ghost.append(c["device"])
     if busy:
         raise PortBusy("串口 %s 被占用 (可能有另一个实例在运行)" % ", ".join(busy))
+    if ghost:
+        raise GhostPort(
+            "串口 %s 存在于列表中但底层设备不存在 —— 通常是 Windows 蓝牙端口分配"
+            "残留(多个设备占了同一个 COM 号)。重启电脑, 或在设备管理器里"
+            "「显示隐藏的设备」后卸载陈旧的『蓝牙链接上的标准串行』, 再重新配对。"
+            % ", ".join(ghost))
     return None, None
 
 
@@ -264,6 +288,25 @@ class PortBusy(Exception):
 
 class DeviceNotFound(Exception):
     """没有找到会应答的耳机串口(未配对 / 未开机 / 不支持 SPP)。"""
+
+
+class GhostPort(Exception):
+    """串口在列表里但底层设备对象不存在(Windows 蓝牙端口分配残留)。"""
+
+
+def _is_ghost(exc):
+    """端口在列表里, 但底层设备对象不存在 —— 打不开。
+
+    典型场景: Windows 的 SERIALCOMM 映射里残留了已卸载的 BthModem 设备,
+    而它和当前设备**占用了同一个 COM 号**。此时 CreateFile 会解析到那个
+    幽灵设备, 返回"系统找不到指定的文件"。
+
+    这不是耳机的问题, 是 Windows 蓝牙端口分配残留。修复办法见
+    docs/TROUBLESHOOTING.md —— 通常重启或重新配对即可。
+    """
+    m = str(exc).lower()
+    return ("filenotfound" in m or "找不到" in m or "does not exist" in m
+            or "系统找不到" in str(exc))
 
 
 def _is_busy(exc):

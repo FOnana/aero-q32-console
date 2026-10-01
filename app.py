@@ -437,6 +437,12 @@ class Worker(QObject):
                 A.log().warning("%s", ex)
                 self.status.emit({"state": "busy"})
                 self._teardown()
+            except A.GhostPort as ex:
+                # 端口在列表里但打不开: Windows 端口分配残留, 不是耳机的问题
+                self.log.emit("⚠ %s" % ex)
+                A.log().warning("幽灵串口: %s", ex)
+                self.status.emit({"state": "notfound"})
+                self._teardown()
             except A.DeviceNotFound as ex:
                 self.log.emit("⚠ %s" % ex)
                 self.log.emit("   排查步骤: 1) 确认耳机已开机并已与电脑配对; "
