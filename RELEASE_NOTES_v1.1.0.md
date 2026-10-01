@@ -97,3 +97,19 @@ AERO Q32 上看不到这个问题，因为它的降噪查询会应答，每 4 �
 - **50 项单元测试，全部免硬件**
 - 真机验证：AERO Q32（完整）+ S20 Pro（电量、查询、写入）
 - `python aero_cli.py doctor` 一条命令做环境诊断
+
+---
+
+## 下载
+
+**[AeroQ32.exe](https://github.com/FOnana/aero-q32-console/releases/download/v1.1.0/AeroQ32.exe)**
+— 45.3 MB，单文件，**不需要安装 Python**
+
+```
+SHA256  23f9d9d042e953c52f83c763eb3fcabc30a3cd11f94d88fc8f38722f41f59e98
+```
+
+解压出来直接双击。首次运行可能被 Windows SmartScreen 拦一下
+（未签名的独立开发者程序），点「更多信息」→「仍要运行」。
+
+想自己构建，或用命令行版本（`aero_cli.py`）：见 [README](https://github.com/FOnana/aero-q32-console#readme)。
