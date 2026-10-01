@@ -51,6 +51,23 @@ MAX_PAYLOAD = 512       # 长度字段超过此值一律视为垃圾
 BUF_CAP = 8192          # 缓冲区上限, 防止异常流撑爆内存
 SPP_UUID = "00001101"   # 串口服务 UUID
 
+# ---- 帧变体: 多字节字段的字节序, 以及第 8 字节的含义 ----
+#
+# 1MORE 不同型号的外层封装不一样。目前实测到两种:
+#
+#   VAR_Q32  AERO Q32:  长度**大端**, 尾字段 00 01, byte8 = XOR(前 8 字节)
+#                       —— 校验算法已完全破解
+#   VAR_LE   S20PRO  :  长度**小端**, 尾字段 01 00, byte8 不是校验和
+#                       —— 已穷举 256 个 CRC-8 多项式 x 初值 0x00/0xFF
+#                          x 位反转 x 9 种取值范围, 加上求和/异或/取反,
+#                          全部不匹配。且同一命令的**应答**该字节稳定、
+#                          设备**主动通知**时变值 => 疑似标记帧来源而非校验。
+#
+# 判别式就是尾字段: 00 01 -> Q32, 01 00 -> 小端变体。两者不会混淆。
+VAR_Q32 = "q32"
+VAR_LE = "le"
+VARIANTS = {VAR_Q32: "AERO Q32 大端封装", VAR_LE: "小端封装 (如 S20PRO)"}
+
 
 # ============================ 帧编解码 ============================
 
@@ -73,21 +90,25 @@ def checksum(body8):
 
 
 def _plausible(buf, i):
-    """buf[i] 是否像一个合法帧头"""
+    """buf[i] 是否像一个合法帧头 (两种变体都认)"""
     if i + HDR > len(buf):
         return False
-    return (buf[i] in (SOF_REQ, SOF_RSP)
+    if not (buf[i] in (SOF_REQ, SOF_RSP)
             and buf[i + 1] == 0x01
-            and buf[i + 2] == 0x00
-            and buf[i + 6] == 0x00
-            and buf[i + 7] == 0x01)
+            and buf[i + 2] == 0x00):
+        return False
+    # 尾字段是变体判别式: 00 01 = Q32 大端写法, 01 00 = 小端变体
+    return (buf[i + 6], buf[i + 7]) in ((0x00, 0x01), (0x01, 0x00))
 
 
 def extract(buf, stats=None):
     """
     从 bytearray 缓冲区里切出所有完整合法帧 (原地修改 buf)。
-    返回 [(sof, cmd, payload), ...]
+    返回 [(sof, cmd, payload, variant), ...]
     遇到脏字节只前移一位重新同步, 绝不永久卡死。
+
+    variant 见 VAR_Q32 / VAR_LE。大端变体仍做完整 XOR 校验;
+    小端变体第 8 字节含义未知, 只能做结构性校验。
     """
     frames = []
     i = 0
@@ -99,7 +120,9 @@ def extract(buf, stats=None):
             i += 1
             skipped += 1
             continue
-        ln = int.from_bytes(buf[i + 4:i + 6], "big")
+        var = VAR_Q32 if (buf[i + 6], buf[i + 7]) == (0x00, 0x01) else VAR_LE
+        ln = int.from_bytes(buf[i + 4:i + 6],
+                            "big" if var == VAR_Q32 else "little")
         if ln > MAX_PAYLOAD:                 # 长度离谱 -> 当作脏字节跳过
             i += 1
             skipped += 1
@@ -110,13 +133,19 @@ def extract(buf, stats=None):
         if i + total > len(buf):
             break                            # 数据还不够, 等下一批
         body = bytes(buf[i:i + HDR])
-        if checksum(body[0:8]) != body[8]:
-            i += 1                           # 校验失败 -> 重新同步
-            skipped += 1
-            if stats is not None:
-                stats["bad_ck"] += 1
-            continue
-        frames.append((body[0], body[3], bytes(buf[i + HDR:i + total])))
+        if var == VAR_Q32:
+            if checksum(body[0:8]) != body[8]:
+                i += 1                       # 校验失败 -> 重新同步
+                skipped += 1
+                if stats is not None:
+                    stats["bad_ck"] += 1
+                continue
+        elif stats is not None:
+            # 小端变体的第 8 字节无法校验(见文件头 VAR_LE 注释)。
+            # 靠 前 3 字节固定 + 尾字段 + 长度上限 三重约束防误同步:
+            # 随机噪声凑出 01 01 00 xx .. 01 00 且长度合理的概率极低。
+            stats["le_frames"] += 1
+        frames.append((body[0], body[3], bytes(buf[i + HDR:i + total]), var))
         i += total
     if i:
         del buf[:i]
@@ -133,7 +162,7 @@ def extract(buf, stats=None):
 # ============================ 端口发现 ============================
 
 def _parse_hwid(hwid):
-    """从 hwid 解析 (是否远端设备口, 设备MAC)。
+    r"""从 hwid 解析 (是否远端设备口, 设备MAC)。
 
     判别依据是**地址**, 不是 hwid 里的 LOCALMFG 字样:
       * 本机传入口的地址恒为 000000000000
@@ -235,7 +264,7 @@ def probe_port(port, timeout=1.0, settle=10.0):
                 n = s.in_waiting
                 if n:
                     buf += s.read(n)
-                    for sof, cmd, _pl in extract(buf):
+                    for sof, cmd, _pl, _var in extract(buf):
                         if sof == SOF_RSP and cmd == 0x4D:
                             return "ok"
                 time.sleep(0.05)
@@ -281,6 +310,10 @@ def discover(timeout=2.0, prefer_port=None, prefer_mac=None, settle=10.0):
 
 
 # ============================ 客户端 ============================
+
+class WriteBlocked(Exception):
+    """写命令被安全闸拦下: 设备只支持只读, 或命令未经验证。"""
+
 
 class PortBusy(Exception):
     """串口被别的进程占用 —— 与"没找到设备"是两回事, 必须分开报。"""
@@ -334,6 +367,8 @@ class AeroQ32:
         self.last_rx = 0.0                    # 最后一个有效帧的时间
         self.opened_at = 0.0
         self.ser = None
+        # 首次收到合法帧后确定; None = 还没见过帧(按 VAR_Q32 处理)
+        self.variant = None
 
     # ---- 生命周期 ----
     def open(self):
@@ -395,7 +430,11 @@ class AeroQ32:
                 if n:
                     data = self.ser.read(n)
                     self._buf += data
-                    for sof, cmd, pl in extract(self._buf, self.stats):
+                    for sof, cmd, pl, var in extract(self._buf, self.stats):
+                        if self.variant is None:
+                            self.variant = var
+                            log().info("检测到帧变体: %s (%s)",
+                                       var, VARIANTS.get(var, "?"))
                         self._rx.append((time.time(), sof, cmd, pl))
                         self.last_rx = time.time()
                         self.stats["frames"] += 1
@@ -458,10 +497,30 @@ class AeroQ32:
         p = self.request(0x5F, wait=2.0)
         return p[0] if p else None
 
+    # ---- 写命令闸门 ----
+    @property
+    def readonly(self):
+        """小端变体(实测 1MORE S20PRO)目前只跑得通只读查询。"""
+        return self.variant == VAR_LE
+
+    def require_write(self, cmd):
+        """写命令放行检查, 不放行直接抛 WriteBlocked。
+
+        set_listen_mode / set_preset_sound / set_connect_option 这几个方法
+        以前是**直接 send** 的, 绕过了安全闸 —— 小端设备上点按钮或按热键
+        照样会把命令发出去。现在它们和 send_raw 走同一道门。
+        Q32 上这三条命令本来就都在 SAFE_WRITE 里, 行为不变。
+        """
+        ok, why = guard_command(cmd, variant=self.variant or VAR_Q32)
+        if not ok:
+            log().warning("拦截写命令 0x%02X: %s", cmd, why)
+            raise WriteBlocked(why)
+
     def send_raw(self, cmd, payload=b"", unlocked=False, wait=2.0):
         """原始命令发送(控制台用)。强制经过安全闸。
         返回 (是否放行, 说明, 回读payload 或 None)"""
-        ok, why = guard_command(cmd, unlocked=unlocked)
+        ok, why = guard_command(cmd, unlocked=unlocked,
+                               variant=self.variant or VAR_Q32)
         if not ok:
             log().warning("控制台拦截 0x%02X: %s", cmd, why)
             return False, why, None
@@ -490,6 +549,7 @@ class AeroQ32:
         注意: 这是「声效」, 与「降噪」(0x5E/0x5F)是两套独立的东西,
         互不影响: 降噪管环境声, 声效管音色曲线。
         """
+        self.require_write(PRESET_SOUND_CMD_SET)
         with self._lock:
             self.send(PRESET_SOUND_CMD_SET, bytes([v]))
             time.sleep(0.30)
@@ -510,6 +570,7 @@ class AeroQ32:
           写入抛 SerialTimeoutException 属**预期行为**，不是故障。
           本方法只负责发出；回读需上层重连后再做。
         """
+        self.require_write(0x6B)
         with self._lock:
             if not self.ser:
                 raise serial.SerialException("串口未打开")
@@ -530,6 +591,7 @@ class AeroQ32:
         因此: 先给 0.45s 静默应用时间, 之后每 0.65s 读一次, 最多约 4 次。
         未生效时返回最后一次观察到的值, 并把原始报文写进日志以便排查。
         """
+        self.require_write(0x5E)
         with self._lock:
             self.send(0x5E, bytes([mode]))
             time.sleep(0.45)
@@ -593,12 +655,21 @@ SAFE_WRITE = {
 }
 
 
-def guard_command(cmd, unlocked=False):
-    """安全闸唯一入口。返回 (是否放行, 说明)。"""
+def guard_command(cmd, unlocked=False, variant=VAR_Q32):
+    """安全闸唯一入口。返回 (是否放行, 说明)。
+
+    variant 为 VAR_LE 时, 写命令默认拦截 —— 那种设备的**请求**帧封装
+    还没有验证过(只验证了它能正确**应答**), 拿真耳机去试写命令风险不对等。
+    """
     if cmd in DENY_COMMANDS:
         return False, "⛔ 永久禁止: %s" % DENY_COMMANDS[cmd]
     if cmd in READ_COMMANDS:
         return True, "只读查询: %s" % READ_COMMANDS[cmd]
+    if variant == VAR_LE:
+        if unlocked:
+            return True, "⚠ 小端变体设备, 写命令帧格式未经验证 (危险模式已解锁)"
+        return False, ("⚠ 该设备使用小端帧封装 (如 1MORE S20PRO), 目前只支持只读查询。"
+                       "写命令帧格式尚未验证, 已拦截; 确需发送请先解锁危险模式")
     if cmd in SAFE_WRITE:
         return True, "已实测写命令: %s" % SAFE_WRITE[cmd]
     if unlocked:
@@ -810,7 +881,7 @@ def hotkey_desc(h):
 
 # ============================ 版本与环境诊断 ============================
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 
 
 def env_report():

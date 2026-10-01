@@ -5,6 +5,53 @@
 | Device | Chipset family | Status |
 |--------|----------------|--------|
 | 1MORE AERO Q32 | Jieli | Fully working: battery, all 8 ANC modes, link mode, sound preset |
+| 1MORE S20 Pro (open-ear clip) | Jieli | **Read-only**: battery works. Writes disabled - see below |
+
+## The little-endian variant
+
+The S20 Pro answers this protocol family, but wraps its frames differently. Compared with the
+AERO Q32:
+
+| | AERO Q32 | S20 Pro |
+|---|---|---|
+| 16-bit header fields | big-endian | **little-endian** |
+| Trailer field | `00 01` | `01 00` |
+| Byte 8 | `XOR(bytes[0:8])` | **not a checksum** |
+
+The trailer doubles as the discriminator, so the parser tells the two apart unambiguously.
+
+Byte 8 on the S20 Pro is still unexplained. All 256 CRC-8 polynomials were tried against
+initial values 0x00 and 0xFF, with and without reflection, over nine different byte ranges -
+plus plain sum, XOR and ones-complement. None matched. Two observations suggest it is not a
+content check at all:
+
+* the reply to `0x4E` carried `0x89` on every request,
+* but an *unsolicited* frame of the same command carried `0x3f`.
+
+Same command, same length, different byte - so it more likely tags the frame origin
+(reply vs. notification) than its contents.
+
+**Because it cannot be verified, the parser falls back to structural checks** for this
+variant: a fixed 3-byte prefix, a valid trailer, and a sane length. Random noise is very
+unlikely to satisfy all three, but the guarantee is weaker than a real checksum, which is
+one more reason writes stay off.
+
+### Why writes are disabled
+
+The S20 Pro **replies correctly** to this project's request frames, so reads are safe and
+useful. That does not mean the *request* framing is correct in the other direction - the
+device may simply be ignoring fields it does not need.
+
+Testing that guess means writing to a real pair of earbuds that cannot be replaced. The
+asymmetry is not worth it, so `require_write()` refuses and the GUI disables the controls.
+
+Reading works because the device answers; writing waits until someone can verify it on
+hardware that is expendable.
+
+### No ANC on the S20 Pro
+
+The S20 Pro is an open-ear clip design; it has no noise cancelling hardware. `0x5F` (ANC)
+is silent - that is the correct behaviour for this model, not a protocol failure.
 
 ## Expected to work
 

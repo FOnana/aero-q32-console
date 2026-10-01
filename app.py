@@ -356,7 +356,9 @@ class Worker(QObject):
                     if dev.handshake() is None:
                         raise IOError("握手无应答, 可能不是本耳机")
                     self.dev = dev
-                    self.status.emit({"state": "connected", "port": port, "mac": dev.mac})
+                    self.status.emit({"state": "connected", "port": port,
+                                      "mac": dev.mac,
+                                      "variant": dev.variant or A.VAR_Q32})
                     self.log.emit("握手完成")
                     A.log().info("已连接 %s MAC=%s", port, dev.mac)
                     self._last_batt = self._last_mode = self._last_conn = None
@@ -485,6 +487,8 @@ class Worker(QObject):
                                   "与手机同时连接时手机端优先 / "
                                   "「风噪降低」这类子模式需要降噪已开启。")
                 self.mode.emit(got)
+        except A.WriteBlocked as ex:
+            self.log.emit(str(ex))
         except Exception as ex:
             self.log.emit("⚠ 写入失败: %s" % ex); A.log().exception("设置降噪失败")
 
@@ -502,6 +506,8 @@ class Worker(QObject):
                 self.log.emit("  设备未采纳，当前为 %s" % got)
             else:
                 self.sound.emit(got)
+        except A.WriteBlocked as ex:
+            self.log.emit(str(ex))
         except Exception as ex:
             self.log.emit("⚠ 写入失败: %s" % ex); A.log().exception("设置风格音效失败")
 
@@ -513,6 +519,9 @@ class Worker(QObject):
             self.log.emit("TX 连接模式 -> %s" % A.CONNECT_TYPES.get(v, v))
             self.log.emit("   (切换会重建蓝牙链路，控制通道将中断约 10 秒)")
             self.dev.set_connect_option(v)
+        except A.WriteBlocked as ex:
+            self.log.emit(str(ex))
+            return
         except Exception as ex:
             self.log.emit("⚠ %s" % ex); A.log().exception("设置连接模式失败")
         self.request_reconnect("链路重建中…")
@@ -969,6 +978,35 @@ class Window(QWidget):
         self.stat.setText("帧 %s · 丢弃 %s · 超时 %s" %
                           (st.get("frames", 0), st.get("dropped", 0), st.get("timeouts", 0)))
 
+    def _apply_variant(self, var):
+        """小端帧变体(实测 1MORE S20PRO)只跑得通只读查询。
+
+        写命令的**请求**帧格式没验证过 —— 只验证了它能正确应答。
+        这里把写类控件禁掉, 而不是让用户点了没反应:
+        "点了没反应"比"禁用了并说明原因"难排查得多。
+
+        协议层的 require_write() 还有一道兜底, 所以就算绕开界面(热键)也发不出去。
+        """
+        if var not in (A.VAR_Q32, A.VAR_LE):
+            return                      # 还没收到过帧, 不做判断
+        le = (var == A.VAR_LE)
+        if le == getattr(self, "_le_mode", None):
+            return                      # 状态没变, 不重复动界面
+        self._le_mode = le
+        tip = "该设备使用小端帧封装（如 1MORE S20PRO），写命令格式尚未验证，已切换为只读"
+        for w in (list(getattr(self, "big", []))
+                  + list(getattr(self, "chips", []))
+                  + list(getattr(self, "conn", []))):
+            w.setEnabled(not le)
+            w.setToolTip(tip if le else "")
+        if hasattr(self, "soundCombo"):
+            self.soundCombo.setEnabled(not le)
+            self.soundCombo.setToolTip(tip if le else "")
+        if le:
+            self.on_log("⚠ 检测到小端帧封装设备（如 1MORE S20PRO）：已自动切换为只读模式")
+            self.on_log("   电量等查询正常；降噪 / 连接模式 / 风格音效等设置已禁用")
+            self.on_log("   原因：该变体的写命令帧格式尚未验证，不拿真耳机去试")
+
     def on_status(self, s):
         state = s.get("state")
         if state == "connected":
@@ -981,6 +1019,7 @@ class Window(QWidget):
             self.setWindowTitle(shown if shown == APP_TITLE
                                 else "%s · %s" % (shown, APP_TITLE))
             self.tray.setToolTip(shown)
+            self._apply_variant(s.get("variant"))
         elif state == "busy":
             self.dot.setStyleSheet("color:%s;font-size:16px;" % ACCENT); self.st.setText("串口被占用")
         elif state == "connecting":

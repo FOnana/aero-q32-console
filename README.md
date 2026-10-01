@@ -13,7 +13,8 @@
 
 > ### ⚠️ 先读这个，再动手
 >
-> **目前只验证过 1MORE AERO Q32 一款设备。这不是通用蓝牙耳机工具。**
+> **只有 1MORE AERO Q32 是完整验证的。这不是通用蓝牙耳机工具。**
+> 同品牌的 S20 Pro 属于同一协议族的**小端变体**，目前仅支持只读（电量）。
 >
 > 能否使用取决于两个**硬性条件**（标准 SPP 串口 + 同一套命令协议），缺一不可 ——
 > 详见 [兼容性](#兼容性)。同品牌的其他型号也按型号分叉，其他品牌基本不可用。
@@ -162,7 +163,32 @@ python app.py
 | 设备 | 结果 |
 |---|---|
 | **1MORE AERO Q32** | ✅ 电量 / 8 种降噪 / 连接模式 / 风格音效 全部可用 |
+| **1MORE S20 Pro**（耳夹式） | ⚠️ **只读**：电量能读，写命令已禁用（原因见下） |
 | **漫步者花再 Zero Buds** | ❌ 虽然是杰理芯片，但控制通道在私有 UUID（`JL_SPP`）上，且使用另一套协议 |
+
+### 同一品牌也会"方言不同"
+
+S20 Pro 能应答这套协议，但外层封装是另一套写法：
+
+| | AERO Q32 | S20 Pro |
+|---|---|---|
+| 16 位字段 | 大端 | **小端** |
+| 尾字段 | `00 01` | `01 00` |
+| 第 8 字节 | `XOR(前 8 字节)` | **不是校验和** |
+
+第 8 字节至今没破解：256 个 CRC-8 多项式 × 初值 0x00/0xFF × 位反转 × 9 种取值范围，
+再加上求和、异或、取反，**全部不匹配**。而且同一条 `0x4E` 的应答恒为 `0x89`，
+设备**主动推送**的同类帧却是 `0x3f` —— 同样的内容、不同的值，所以它更像是标记
+"这帧是谁发的"，而不是校验内容。
+
+**因为这个字节没法校验，小端变体只能靠结构来定帧**（固定前 3 字节 + 尾字段 + 合理长度）。
+这比真校验和弱，所以本工具对该变体**只读**：能答上来的查询照常读，写命令一律拦住。
+
+> 拦住写命令的理由：设备**能正确应答**我们的请求帧，只说明读的方向没问题；
+> 反方向的请求格式对不对，没验证过 —— 它可能只是忽略了不需要的字段。
+> 去验证意味着往一副没法替换的真耳机里写数据，这个风险不对等。
+
+> 另外，S20 Pro 是**耳夹式开放结构，没有降噪硬件**，`0x5F` 不回应是正常的，不是协议故障。
 
 ### 为什么"同样是杰理芯片"也不能保证可用
 
@@ -382,7 +408,8 @@ python aero_cli.py probe       # which commands your device answers (read-only)
   instantly, but the RFCOMM link behind it may take 6+ seconds to come up; data written during
   that window is dropped. Discovery retries the handshake for up to 10 seconds.
 * The serial port is discovered from the device hardware ID - never a hard-coded COM number.
-* Verified: 1MORE AERO Q32. Not verified: anything else.
+* Fully verified: 1MORE AERO Q32. Partially verified (read-only, little-endian frame variant):
+  1MORE S20 Pro. Not verified: anything else.
 * Firmware-flashing and irreversible-delete commands are **hard-blocked in code**, even when
   the raw console is unlocked.
 

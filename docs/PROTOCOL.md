@@ -25,7 +25,8 @@ Never hard-code a COM number.
 
 ## Frame format
 
-All multi-byte integers are **big-endian**.
+On the reference device all multi-byte integers are **big-endian**. Not every model agrees -
+see [Frame variants](#frame-variants) below.
 
 ```
 offset  size  meaning
@@ -54,14 +55,44 @@ response: 01 01 00 5F 00 01 00 01 5F 01
                                         ^^ payload: mode = 1 (strong ANC)
 ```
 
+## Frame variants
+
+The same protocol family is wrapped differently across 1MORE models. Two variants have been
+observed on real hardware:
+
+| | `VAR_Q32` | `VAR_LE` |
+|---|---|---|
+| Seen on | AERO Q32 | S20 Pro |
+| Header integers | big-endian | little-endian |
+| Trailer (bytes 6-7) | `00 01` | `01 00` |
+| Byte 8 | `XOR(bytes[0:8])` | unknown, not a checksum |
+
+The trailer is the discriminator, so the two never get confused - the parser reads bytes 6-7
+first and picks the byte order accordingly.
+
+### `VAR_LE` byte 8 is unsolved
+
+Exhaustive search found no match: all 256 CRC-8 polynomials x initial values `0x00`/`0xFF` x
+with/without reflection x nine byte ranges, plus plain sum, XOR and ones-complement.
+
+Evidence that it is not a content check: the reply to `0x4E` always carried `0x89`, while an
+**unsolicited** frame of the same command and same length carried `0x3f`. Same content,
+different byte - so it likely encodes the frame origin (reply vs. notification).
+
+Since it cannot be verified, `VAR_LE` frames are accepted on structure alone: fixed 3-byte
+prefix, valid trailer, sane length. That is weaker than a checksum, so this variant is
+**read-only** - see [COMPATIBILITY.md](COMPATIBILITY.md).
+
 ## Resynchronisation
 
 A byte stream can lose or gain bytes. A parser must not assume frame alignment:
 
-1. Look for a plausible header: byte0 in {0x01, 0x11}, byte1 = 0x01, byte2 = 0x00,
-   byte6 = 0x00, byte7 = 0x01.
-2. Reject implausible length fields (a sane cap is a few hundred bytes).
-3. Verify the checksum; on mismatch, advance **one byte** and retry.
+1. Look for a plausible header: byte0 in {0x01, 0x11}, byte1 = 0x01, byte2 = 0x00, and the
+   trailer pair `(byte6, byte7)` equal to `(0x00, 0x01)` or `(0x01, 0x00)`.
+2. Pick the byte order from the trailer, then reject implausible length fields (a sane cap is
+   a few hundred bytes).
+3. For `VAR_Q32`, verify the checksum and advance **one byte** on mismatch. For `VAR_LE` there
+   is nothing to verify, so the structural checks in steps 1-2 carry the whole burden.
 
 Advancing a whole frame on a bad checksum is wrong - a single corrupt byte would then lose
 an entire frame. Advancing one byte recovers.

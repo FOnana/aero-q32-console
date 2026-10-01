@@ -93,10 +93,79 @@ class TestFrameSync:
 
     def test_extract_returns_direction_and_command(self):
         frames, _ = feed([GOOD])
-        sof, cmd, payload = frames[0]
+        sof, cmd, payload, var = frames[0]
         assert sof == A.SOF_RSP
         assert cmd == 0x4E
         assert len(payload) == 10
+        assert var == A.VAR_Q32
+
+
+# ---- 小端变体 (1MORE S20PRO) ----
+#
+# 抓自真机。与 Q32 同属一套协议族, 但每个 16 位字段都是小端, 且第 8 字节不是校验和:
+# 穷举 256 个 CRC-8 多项式 x 初值 0x00/0xFF x 位反转 x 9 种取值范围, 加上求和、异或、
+# 取反, 9 个样本全部不匹配。它更像是标记帧的来源 —— 同一条 0x4E 的应答是 0x89,
+# 而设备主动推送的同类帧是 0x3f。既然无法校验, 就只能靠结构性约束防误同步。
+LE_HANDSHAKE = bytes.fromhex("0101004d010001004301")
+LE_BATTERY = bytes.fromhex("0101004e0a0001008900020006640200066457")
+
+
+class TestLittleEndianVariant:
+    def test_le_frame_parses(self):
+        frames, leftover = feed([LE_HANDSHAKE])
+        assert len(frames) == 1
+        assert leftover == b""
+        sof, cmd, payload, var = frames[0]
+        assert sof == A.SOF_RSP
+        assert cmd == 0x4D
+        assert payload == b"\x01"
+        assert var == A.VAR_LE
+
+    def test_le_length_field_is_little_endian(self):
+        frames, _ = feed([LE_BATTERY])
+        assert len(frames) == 1
+        assert len(frames[0][2]) == 10
+
+    def test_le_battery_layout_matches_q32(self):
+        # Values sit at the same offsets as the Q32: p[4] left, p[8] right, p[9] case.
+        frames, _ = feed([LE_BATTERY])
+        p = frames[0][2]
+        assert (p[4], p[8], p[9]) == (100, 100, 87)
+
+    def test_le_frame_survives_unknown_checksum_byte(self):
+        # Byte 8 is unverifiable on this variant, so it must not gate parsing.
+        mutated = bytearray(LE_HANDSHAKE)
+        mutated[8] = 0x00
+        frames, _ = feed([bytes(mutated)])
+        assert len(frames) == 1
+
+    def test_le_and_q32_frames_mix(self):
+        frames, _ = feed([LE_HANDSHAKE, GOOD, GOOD2])
+        assert [f[3] for f in frames] == [A.VAR_LE, A.VAR_Q32, A.VAR_Q32]
+
+    def test_le_frame_split_across_reads(self):
+        frames, _ = feed([LE_BATTERY[:4], LE_BATTERY[4:]])
+        assert len(frames) == 1
+
+    def test_unknown_tail_is_not_a_frame(self):
+        # 00 02 is neither variant tail - must never be accepted.
+        frames, _ = feed([bytes.fromhex("0101004d010000024301")])
+        assert frames == []
+
+    def test_le_writes_blocked_by_default(self):
+        # The request-frame format for this variant is unverified: reads are safe,
+        # writes would be tested on a real pair of earbuds.
+        for cmd in A.SAFE_WRITE:
+            ok, why = A.guard_command(cmd, variant=A.VAR_LE)
+            assert ok is False, why
+
+    def test_le_reads_still_allowed(self):
+        for cmd in A.READ_COMMANDS:
+            assert A.guard_command(cmd, variant=A.VAR_LE)[0] is True
+
+    def test_le_deny_list_unaffected(self):
+        for cmd in A.DENY_COMMANDS:
+            assert A.guard_command(cmd, unlocked=True, variant=A.VAR_LE)[0] is False
 
 
 class TestSafetyGate:
@@ -140,6 +209,27 @@ class TestSafetyGate:
         src = inspect.getsource(A.probe_capabilities)
         assert "READ_COMMANDS" in src
         assert "SAFE_WRITE" not in src
+
+
+class TestConsoleEncoding:
+    """中文 Windows 控制台是 cp936, 而拦截提示里带 ⛔/⚠。
+
+    修复前: 被拦截的 raw 命令抛 UnicodeEncodeError, 退出码从 3 变成 1,
+    调用方无法区分"被安全闸拒绝"和"程序崩了"。
+    """
+
+    def test_guard_messages_survive_gbk(self):
+        for cmd in list(A.DENY_COMMANDS) + [0xAA]:
+            _, why = A.guard_command(cmd)
+            assert why.encode("gbk", errors="replace")
+
+    def test_le_guard_message_survives_gbk(self):
+        _, why = A.guard_command(0x5E, variant=A.VAR_LE)
+        assert why.encode("gbk", errors="replace")
+
+    def test_cli_relaxes_console_errors(self):
+        import inspect, aero_cli
+        assert "reconfigure" in inspect.getsource(aero_cli)
 
 
 class TestValueMappings:

@@ -3,6 +3,35 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - unreleased
+
+### Added
+
+* Support for the **little-endian frame variant** used by the 1MORE S20 Pro. Its header
+  integers are byte-swapped and its byte 8 is not a checksum, so the parser now reads the
+  trailer first and picks the byte order from it. Battery reads work on this variant;
+  writes are refused. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+* `WriteBlocked` exception and `AeroQ32.require_write()`, plus a `variant` field on the CLI
+  `json` output.
+
+### Fixed
+
+* **Write methods bypassed the safety gate.** `set_listen_mode()`, `set_preset_sound()` and
+  `set_connect_option()` called `send()` directly, so the gate was only consulted on the raw
+  console path. They now go through `require_write()` like everything else.
+* **Blocked commands crashed instead of refusing on Chinese Windows.** The console there is
+  cp936, which cannot encode the warning glyphs in the gate messages, so a refusal raised
+  `UnicodeEncodeError` - exit code 1 (crash) instead of 3 (blocked). Callers could not tell a
+  refusal from a failure. The CLI now relaxes stream error handling (it keeps the console
+  encoding, so Chinese still renders).
+* `SyntaxWarning` from an invalid escape sequence in the `_parse_hwid()` docstring.
+
+### Changed
+
+* The GUI disables write controls when it detects the little-endian variant, rather than
+  letting a click do nothing.
+* `extract()` now returns `(sof, cmd, payload, variant)` - the tuple gained a field.
+
 ## [1.0.0] - unreleased
 
 First public release. Reconstructed from an internal working tool with the following changes:

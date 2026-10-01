@@ -29,6 +29,18 @@ Jieli 真无线耳机命令行接口 —— 供脚本 / 批处理 / 计划任务
 import sys, json, time
 import aero_q32 as A
 
+# 中文 Windows 的控制台默认是 GBK, 打不出 ⛔ / ⚠ 这类符号。
+# 不处理的话, "被安全闸拦截"会先抛 UnicodeEncodeError:
+#   期望 -> 退出码 3 (被拦截)
+#   实际 -> 栈回溯, 退出码 1
+# 调用脚本就没法区分"被拒绝"和"自己崩了"。
+# 这里只放宽错误处理, **不改编码**, 所以中文照常显示, 只是个别符号降级成 ?。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 MODE_ALIAS = {
     "off": 0, "close": 0, "0": 0, "关闭": 0,
     "strong": 1, "1": 1, "强降噪": 1,
@@ -217,6 +229,7 @@ def main():
             s = dev.get_preset_sound()
             print(json.dumps({
                 "port": dev.port, "mac": dev.mac,
+                "variant": dev.variant or A.VAR_Q32,
                 "battery": b,
                 "listen_mode": m, "listen_mode_name": A.LISTEN_MODES.get(m),
                 "connect_option": c, "connect_option_name": A.CONNECT_TYPES.get(c),
@@ -226,6 +239,11 @@ def main():
             return EXIT_OK
 
         die(EXIT_ERR, "未知子命令: %s" % cmd)
+    except A.WriteBlocked as e:
+        # 设备只支持只读(小端变体), 或命令未验证。
+        # 这是**被拒绝**, 不是崩溃 —— 必须给出退出码 3, 否则调用脚本分不清。
+        print(e, file=sys.stderr)
+        return EXIT_BLOCKED
     finally:
         try:
             dev.close()
