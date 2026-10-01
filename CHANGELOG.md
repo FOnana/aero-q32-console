@@ -28,6 +28,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* **The UI now adapts to what the device actually answers.** A panel whose query never gets
+  a reply is collapsed, instead of being left as a row of dead controls - an open-ear clip
+  model has no ANC hardware, so `0x5F` is silent and the whole ANC card is meaningless there.
+  Capability comes from polling (consecutive non-answers) or from the self-test button.
+  Non-answers are only attributed to a feature while the link is demonstrably alive, so a
+  dropped connection is never mistaken for an unsupported feature.
+* Read-only devices show a badge and an explanation banner rather than silently disabled
+  controls.
 * The GUI disables write controls when it detects the little-endian variant, rather than
   letting a click do nothing.
 * `extract()` now returns `(sof, cmd, payload, variant)` - the tuple gained a field.

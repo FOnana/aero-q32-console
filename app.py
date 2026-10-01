@@ -43,6 +43,12 @@ POLL_MODE = 4.0           # 降噪模式可能被耳机自己改(如子模式回
 POLL_CONN = 15.0
 POLL_SOUND = 30.0
 QUIET_AFTER_CMD = 3.0     # 用户发命令后的静默窗口: 这段时间不打扰设备
+# 有的设备根本不实现某些查询(耳夹式没有降噪硬件, 0x5F 永远不应答)。
+# 一直问只会白占链路, 还把超时计数刷得很难看 —— 所以要能自己放弃。
+POLL_GIVE_UP = 2          # 连续无应答几次后判定"设备不支持", 停止轮询该项
+POLL_LINK_FRESH = 15.0    # 多久内有过成功轮询, 才算"链路还活着"
+POLL_LABELS = {"batt": "电量", "mode": "降噪模式",
+               "conn": "连接模式", "sound": "风格音效"}
 
 MAX_LOG_LINES = 400
 LOW_BATTERY = 20          # 低电量阈值 % (可被配置覆盖)
@@ -298,6 +304,7 @@ class Worker(QObject):
     stats = Signal(object)
     probe_row = Signal(object)
     probe_done = Signal(object)
+    caps = Signal(object)          # 设备实际应答能力变化 -> 界面跟着收放
 
     def __init__(self):
         super().__init__()
@@ -315,6 +322,10 @@ class Worker(QObject):
         self._next_conn = 0.0
         self._next_sound = 0.0
         self._quiet_until = 0.0
+        # 轮询自适应: 记录每项连续失败次数, 判定不支持后就不再问
+        self._poll_fail = {}
+        self._poll_off = set()
+        self._last_ok_poll = 0.0
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -335,6 +346,30 @@ class Worker(QObject):
         except Exception:
             A.log().exception("关闭设备失败")
         self.dev = None
+
+    def _poll_ok(self, tag, res):
+        """记一次轮询结果。返回 True 表示这一项确实读到了数据。
+
+        连续无应答到阈值就永久放弃这一项 —— 设备不实现的查询没必要一直问。
+
+        但只有在"链路明显还活着"时才敢这么判(靠 self._last_ok_poll):
+        如果连电量都读不到, 那是链路断了, 不能把责任推给某一项,
+        否则一断线就会误判成"这台设备不支持降噪", 重连后界面就少了一块。
+        """
+        if res is None:
+            if time.time() - self._last_ok_poll > POLL_LINK_FRESH:
+                self._poll_fail[tag] = 0        # 链路本身不通, 不记账
+                return False
+            self._poll_fail[tag] = self._poll_fail.get(tag, 0) + 1
+            if self._poll_fail[tag] >= POLL_GIVE_UP and tag not in self._poll_off:
+                self._poll_off.add(tag)
+                A.log().info("轮询项 %s 连续 %d 次无应答 -> 判定设备不支持, 停止轮询",
+                             tag, POLL_GIVE_UP)
+                self.caps.emit(set(self._poll_off))   # 快照, 别把内部集合递出去
+            return False
+        self._poll_fail[tag] = 0
+        self._last_ok_poll = time.time()
+        return True
 
     def _run(self):
         backoff = 2.0
@@ -364,6 +399,10 @@ class Worker(QObject):
                     self._last_batt = self._last_mode = self._last_conn = None
                     self._last_sound = None
                     self._last_hb = 0.0
+                    # 换了一次连接就重新判断一遍能力, 不沿用上一轮的结论
+                    self._poll_fail.clear()
+                    self._poll_off.clear()
+                    self._last_ok_poll = time.time()
                     # 刚连上先全量取一次, 之后按各自节奏轮询
                     self._next_batt = self._next_mode = 0.0
                     self._next_conn = self._next_sound = 0.0
@@ -380,10 +419,10 @@ class Worker(QObject):
                 # 用户发命令后还有一段静默窗口, 期间完全不打扰设备。
                 if not self.busy_probe and time.time() >= self._quiet_until:
                     now = time.time()
-                    if now >= self._next_batt:
+                    if "batt" not in self._poll_off and now >= self._next_batt:
                         self._next_batt = now + POLL_BATTERY
                         b = self.dev.battery()
-                        if b:
+                        if self._poll_ok("batt", b) and b:
                             self.battery.emit(b)
                             if b != self._last_batt:
                                 self.log.emit("RX 电量   左%d%%   右%d%%   盒%s" %
@@ -394,26 +433,26 @@ class Worker(QObject):
                                              b.get("left"), b.get("right"), b.get("case"),
                                              b.get("raw"), b.get("len"))
                                 self._last_batt = b
-                    if now >= self._next_mode:
+                    if "mode" not in self._poll_off and now >= self._next_mode:
                         self._next_mode = now + POLL_MODE
                         m = self.dev.get_listen_mode()
-                        if m is not None:
+                        if self._poll_ok("mode", m) and m is not None:
                             self.mode.emit(m)
                             if m != self._last_mode:
                                 self.log.emit("RX 降噪模式   %s (%d)" % (A.LISTEN_MODES.get(m, "?"), m))
                                 self._last_mode = m
-                    if now >= self._next_conn:
+                    if "conn" not in self._poll_off and now >= self._next_conn:
                         self._next_conn = now + POLL_CONN
                         c = self.dev.get_connect_option()
-                        if c is not None:
+                        if self._poll_ok("conn", c) and c is not None:
                             self.connect.emit(c)
                             if c != self._last_conn:
                                 self.log.emit("RX 连接模式   %s (%d)" % (A.CONNECT_TYPES.get(c, "?"), c))
                                 self._last_conn = c
-                    if now >= self._next_sound:
+                    if "sound" not in self._poll_off and now >= self._next_sound:
                         self._next_sound = now + POLL_SOUND
                         snd = self.dev.get_preset_sound()
-                        if snd is not None:
+                        if self._poll_ok("sound", snd) and snd is not None:
                             self.sound.emit(snd)
                             if snd != self._last_sound:
                                 self.log.emit("RX 风格音效   %s (%d)"
@@ -535,6 +574,14 @@ class Worker(QObject):
             rows = A.probe_capabilities(self.dev, on_result=self.probe_row.emit, wait=1.0)
             sup = [r for r in rows if r[2]]
             self.log.emit("=== 自检完成: 支持 %d / %d 项 ===" % (len(sup), len(rows)))
+            # 自检结果直接拿来调轮询: 设备不答的项目没必要再问一遍,
+            # 界面也能立刻收掉对应面板, 不用等轮询自己慢慢放弃。
+            probe_map = {0x4E: "batt", 0x5F: "mode", 0x6C: "conn", 0x6A: "sound"}
+            for cmd, _name, ok, _ln, _hx in rows:
+                tag = probe_map.get(cmd)
+                if tag and not ok:
+                    self._poll_off.add(tag)
+            self.caps.emit(set(self._poll_off))
             self.probe_done.emit(rows)
             A.log().info("自检完成, 支持 %d/%d", len(sup), len(rows))
         except Exception as ex:
@@ -683,11 +730,13 @@ class Window(QWidget):
         self.w.probe_row.connect(self.on_probe_row)
         self.w.sound.connect(self.on_sound)
         self.w.probe_done.connect(self.on_probe_done)
+        self.w.caps.connect(self.on_caps)
 
         self._low_warned = False
         self._tray_hinted = False
         self._last_data = 0.0          # 有真实数据前不谎报"刚刚更新"
         self._last_probe = []
+        self._caps_noted = set()
         self.cfg = A.load_settings()
         self.LOW = int(self.cfg.get("low_battery", LOW_BATTERY))
         self.w.hb_sec = int(self.cfg.get("heartbeat_sec", HEARTBEAT_SEC))
@@ -732,6 +781,12 @@ class Window(QWidget):
         top.addSpacing(8)
         self.dot = QLabel("●"); self.dot.setStyleSheet("color:%s;font-size:16px;" % WARN); top.addWidget(self.dot)
         self.st = QLabel("连接中…"); self.st.setObjectName("muted"); top.addWidget(self.st)
+        # 只读徽标: 默认隐藏, 检测到只读设备才亮
+        self.roBadge = QLabel("只读")
+        self.roBadge.setStyleSheet("color:%s;border:1px solid %s;border-radius:4px;"
+                                   "padding:0px 6px;font-size:11px;" % (WARN, WARN))
+        self.roBadge.setVisible(False)
+        top.addWidget(self.roBadge)
         top.addStretch(1)
         self.stat = QLabel(""); self.stat.setStyleSheet("color:%s;font-size:11px;" % MUTED); top.addWidget(self.stat)
         top.addSpacing(8)
@@ -749,6 +804,16 @@ class Window(QWidget):
         self.btnRe.clicked.connect(lambda: self.w.reconnect()); top.addWidget(self.btnRe)
         root.addLayout(top)
 
+        # 只读说明条: 默认隐藏。用整条说明代替零散 tooltip ——
+        # "为什么点不动"这件事要一次说清, 而不是让用户逐个按钮去悬停。
+        self.roBanner = QLabel("")
+        self.roBanner.setWordWrap(True)
+        self.roBanner.setStyleSheet("color:%s;background:%s;border:1px solid %s;"
+                                    "border-radius:6px;padding:8px 10px;font-size:12px;"
+                                    % (WARN, PANEL_HI, WARN))
+        self.roBanner.setVisible(False)
+        root.addWidget(self.roBanner)
+
         c0 = Card("电  量")
         rings = QHBoxLayout(); rings.setSpacing(36); rings.addStretch(1)
         self.rL = Ring("左耳"); self.rC = Ring("充电盒"); self.rR = Ring("右耳")
@@ -756,6 +821,7 @@ class Window(QWidget):
         rings.addStretch(1); c0.v.addLayout(rings); root.addWidget(c0)
 
         c1 = Card("降噪模式")
+        self.cardAnc = c1           # 有的设备根本没这功能, 要能整块收起来
         row = QHBoxLayout(); row.setSpacing(10); self.big = []
         for val, lab in ((0, "关闭"), (1, "强降噪"), (3, "通透")):
             b = ModeButton(val, lab)
@@ -774,6 +840,7 @@ class Window(QWidget):
         root.addWidget(c1)
 
         c15 = Card("蓝牙连接模式")
+        self.cardConn = c15
         crow = QHBoxLayout(); crow.setSpacing(8); self.conn = []
         for val in (0, 1, 2):
             ch = Chip(val, A.CONNECT_TYPES[val])
@@ -788,6 +855,7 @@ class Window(QWidget):
 
         # 风格音效 (声效) —— 与降噪是两套独立的东西
         c16 = Card("风格音效")
+        self.cardSound = c16
         srow = QHBoxLayout(); srow.setSpacing(8)
         srow.addWidget(self._lab("预设"))
         self.soundCombo = QComboBox()
@@ -978,6 +1046,27 @@ class Window(QWidget):
         self.stat.setText("帧 %s · 丢弃 %s · 超时 %s" %
                           (st.get("frames", 0), st.get("dropped", 0), st.get("timeouts", 0)))
 
+    def on_caps(self, off):
+        """按设备**实际应答能力**收放面板。
+
+        设备根本不实现的查询, 把面板留着只会误导 —— 一整块点不动、又没有数值的
+        降噪按钮, 看起来就像程序坏了。所以直接收起来, 并在日志里说清原因。
+
+        判定来自两条路: 轮询连续无应答, 或用户点了「设备自检」。见 Worker._poll_ok。
+        """
+        self.cardAnc.setVisible("mode" not in off)
+        self.cardConn.setVisible("conn" not in off)
+        self.cardSound.setVisible("sound" not in off)
+        # 托盘菜单里还有一份同样的入口, 不收掉就变成"界面没了但托盘还能点"
+        self.menu_mode.menuAction().setVisible("mode" not in off)
+        self.menu_sound.menuAction().setVisible("sound" not in off)
+        for tag in sorted(off):
+            if tag in self._caps_noted:
+                continue
+            self._caps_noted.add(tag)
+            self.on_log("设备不响应「%s」查询 —— 该型号没有这项功能，已收起对应面板"
+                        % POLL_LABELS.get(tag, tag))
+
     def _apply_variant(self, var):
         """小端帧变体(实测 1MORE S20PRO)只跑得通只读查询。
 
@@ -993,7 +1082,8 @@ class Window(QWidget):
         if le == getattr(self, "_le_mode", None):
             return                      # 状态没变, 不重复动界面
         self._le_mode = le
-        tip = "该设备使用小端帧封装（如 1MORE S20PRO），写命令格式尚未验证，已切换为只读"
+        tip = ("该设备使用小端帧封装（如 1MORE S20PRO），写命令格式尚未验证，"
+               "已切换为只读：下面的按钮只表示当前状态，点不动")
         for w in (list(getattr(self, "big", []))
                   + list(getattr(self, "chips", []))
                   + list(getattr(self, "conn", []))):
@@ -1002,10 +1092,15 @@ class Window(QWidget):
         if hasattr(self, "soundCombo"):
             self.soundCombo.setEnabled(not le)
             self.soundCombo.setToolTip(tip if le else "")
+        self.roBadge.setVisible(le)
+        self.roBanner.setVisible(le)
         if le:
-            self.on_log("⚠ 检测到小端帧封装设备（如 1MORE S20PRO）：已自动切换为只读模式")
-            self.on_log("   电量等查询正常；降噪 / 连接模式 / 风格音效等设置已禁用")
-            self.on_log("   原因：该变体的写命令帧格式尚未验证，不拿真耳机去试")
+            self.roBanner.setText(
+                "只读模式 · 这台设备用了小端帧封装（如 1MORE S20PRO）。"
+                "已确认它能正确应答查询，但写命令的帧格式没有验证过 —— "
+                "去验证意味着往一副没法替换的真耳机里写数据，风险不对等。"
+                "所以下面的开关只显示当前状态，点不动；电量等查询照常使用。")
+            self.on_log("⚠ 检测到小端帧封装设备（如 1MORE S20PRO）：已切换为只读模式")
 
     def on_status(self, s):
         state = s.get("state")
