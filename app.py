@@ -49,6 +49,8 @@ POLL_GIVE_UP = 2          # 连续无应答几次后判定"设备不支持", 停
 POLL_LINK_FRESH = 15.0    # 多久内有过成功轮询, 才算"链路还活着"
 POLL_LABELS = {"batt": "电量", "mode": "降噪模式",
                "conn": "连接模式", "sound": "风格音效"}
+POLL_INTERVALS = {"batt": POLL_BATTERY, "mode": POLL_MODE,
+                  "conn": POLL_CONN, "sound": POLL_SOUND}
 
 MAX_LOG_LINES = 400
 LOW_BATTERY = 20          # 低电量阈值 % (可被配置覆盖)
@@ -371,6 +373,15 @@ class Worker(QObject):
         self._last_ok_poll = time.time()
         return True
 
+    def _health_window(self):
+        """链路判活的容忍窗口 = 还活着的轮询里最长的那个间隔 + 余量。
+
+        必须跟着**实际轮询计划**走, 不能用固定值: 设备是被动的, 轮询间隔
+        本来就可能比固定的判活阈值长。理由详见 aero_q32.health_window。
+        """
+        gaps = [iv for tag, iv in POLL_INTERVALS.items() if tag not in self._poll_off]
+        return A.health_window(max(gaps) if gaps else 0.0, self._quiet_until)
+
     def _run(self):
         backoff = 2.0
         while not self.stop:
@@ -409,8 +420,11 @@ class Worker(QObject):
                     self._quiet_until = time.time() + 0.5
                     backoff = 2.0
 
-                if not self.dev.healthy(6.0):
-                    raise IOError("链路假死 (6 秒无有效帧)")
+                # 判活窗口跟着轮询计划走, 不能用固定值:
+                # 设备是被动的, 轮询间隔本来就可能超过 6 秒。
+                win = self._health_window()
+                if not self.dev.healthy(win):
+                    raise IOError("链路假死 (%.0f 秒无有效帧)" % win)
 
                 # ── 分频轮询 ──────────────────────────────────────────────
                 # 每个查询按自己的节奏走, 而不是每轮全问一遍。

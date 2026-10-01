@@ -220,6 +220,36 @@ class TestSafetyGate:
         assert "SAFE_WRITE" not in src
 
 
+class TestHealthWindow:
+    """A passive device only talks when spoken to.
+
+    Regression: the liveness check used a FIXED 6s window. On a device that never answers the
+    ANC query, the remaining polls are 10s/15s/30s apart, so the app declared the link dead
+    roughly every 12 seconds and reconnected in a loop while the earbuds were perfectly fine.
+    """
+
+    def test_window_always_covers_a_full_poll_interval(self):
+        # The invariant that was violated. If the window is not longer than a whole poll
+        # interval, every idle stretch between polls looks like a dead link.
+        for interval in (0, 1, 4, 10, 15, 30, 60, 120):
+            win = A.health_window(interval, 0, now=1000.0)
+            assert win > interval, "interval=%s window=%s" % (interval, win)
+
+    def test_sparse_polling_is_tolerated(self):
+        # The 30s sound-preset interval: the old fixed 6s window gave up five times over.
+        assert A.health_window(30.0, 0, now=1000.0) >= 36.0
+
+    def test_short_interval_keeps_the_floor(self):
+        assert A.health_window(0.0, 0, now=1000.0) == A.HEALTH_MIN
+
+    def test_quiet_window_after_a_user_command_counts(self):
+        # Nothing is sent during the quiet window on purpose - that is not a dead link.
+        assert A.health_window(0.0, 1010.0, now=1000.0) >= 10.0 + A.HEALTH_MARGIN
+
+    def test_no_polls_left_falls_back_to_the_floor(self):
+        assert A.health_window(0.0, 0, now=1000.0) == A.HEALTH_MIN
+
+
 class TestConsoleEncoding:
     """中文 Windows 控制台是 cp936, 而拦截提示里带 ⛔/⚠。
 

@@ -26,6 +26,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   refusal from a failure. The CLI now relaxes stream error handling (it keeps the console
   encoding, so Chinese still renders).
 * `SyntaxWarning` from an invalid escape sequence in the `_parse_hwid()` docstring.
+* **Infinite reconnect loop on devices that do not answer every poll.** The liveness check
+  used a fixed 6-second window, but a passive device only sends a frame when it is asked
+  something. Once the S20 Pro's silent ANC query was given up on, the remaining polls were
+  10s/15s/30s apart, so the app declared the link dead every ~12 seconds and reconnected
+  forever while the earbuds were perfectly healthy. The window is now derived from the
+  longest poll interval still in use. Trade-off: a genuinely dead link is now noticed after
+  ~36s instead of 6s.
 
 ### Changed
 

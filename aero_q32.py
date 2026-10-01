@@ -164,6 +164,39 @@ def extract(buf, stats=None):
 
 # ============================ 端口发现 ============================
 
+# ---- 链路判活 ----
+#
+# **设备是被动的**: 只在被问到时才发帧, 不会自己周期性上报。
+# 所以"多久没收到帧算死"这个判据必须跟着**实际轮询计划**走, 不能用固定值。
+#
+# 实测踩的坑(1MORE S20 Pro): 它不答降噪查询(0x5F), 判定不支持之后就只剩
+# 电量(10s)/连接(15s)/音效(30s)三项, 轮询间隔本来就超过 6 秒。固定用 6 秒
+# 判活, 于是每隔十几秒就被自己判一次"链路假死"然后重连 —— 无限重连循环,
+# 而设备一直好好的。
+#
+# AERO Q32 上看不到这个问题, 因为它的降噪查询会应答, 每 4 秒就有一帧,
+# 永远够不着 6 秒那条线。
+HEALTH_MIN = 6.0        # 判活窗口的下限(秒)
+HEALTH_MARGIN = 6.0     # 在最长轮询间隔之上再放宽这么多
+
+
+def health_window(longest_interval, quiet_until, now=None,
+                  minimum=HEALTH_MIN, margin=HEALTH_MARGIN):
+    """算链路判活要容忍多久没收到帧。
+
+    longest_interval: 还活着的那几项轮询里, **最长**的间隔(秒)
+    quiet_until     : 用户命令后静默窗口的结束时刻(这期间故意不发帧)
+
+    为什么用"最长间隔"而不是"距离下次轮询还有多久":
+    判据是"距上次收到帧多久"。若用后者, 轮询刚好到期时它算出来接近 0,
+    窗口缩到下限 6 秒, 而此刻帧龄已经是一个完整轮询间隔(比如 10 秒),
+    照样误判。必须盖过**一个完整间隔**才成立。
+    """
+    now = time.time() if now is None else now
+    quiet = max(0.0, quiet_until - now)
+    return max(minimum, longest_interval + margin, quiet + margin)
+
+
 def _parse_hwid(hwid):
     r"""从 hwid 解析 (是否远端设备口, 设备MAC)。
 

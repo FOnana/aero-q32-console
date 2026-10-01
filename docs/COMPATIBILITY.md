@@ -56,6 +56,11 @@ the app says so in the log instead of pretending it worked.
 The GUI shows a "writes unverified" badge and banner on such devices and leaves every control
 clickable.
 
+**Observed working:** `0x6B` (link mode) was sent to an S20 Pro and took effect - the device
+was on LDAC (`0x6C` reported `2`), the switch was written, the link rebuilt as expected and
+the next read reported standard mode (`0`). The write direction does work on this variant.
+That is still a single data point for one command; the badge stays until more is known.
+
 ### No ANC on the S20 Pro
 
 The S20 Pro is an open-ear clip design; it has no noise cancelling hardware. `0x5F` (ANC)
